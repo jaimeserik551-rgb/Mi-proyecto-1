@@ -9,6 +9,8 @@ import os
 import hashlib
 import secrets
 
+
+
 ARCHIVO = "usuarios_escolares.json"
 
 AZUL_OSCURO = "#0f172a"
@@ -1641,7 +1643,7 @@ def abrir_panel_director(root):
                     )
                 )
 
-
+#Mariana modifico alertas
         def pantalla_cartas():
             limpiar_body("Generar carta compromiso")
             lienzo, contenido = crear_area_desplazable(body, DOC_FONDO)
