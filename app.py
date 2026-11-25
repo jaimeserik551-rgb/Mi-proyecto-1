@@ -1,3 +1,10 @@
+
+'''
+1.- No esta agregado aqui el script de la base de datos para yo poderlo copiar y pegar en xampp y crear la base de datos, 
+de lo contrrio no se puede continuar con la revisión y hacer pruebas.
+2.- Por que no utilizan BD, al yo crear un nuevo usuario, se crea un archivo JSON y no esta correcto. 
+
+'''
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from datetime import date, datetime
@@ -8,8 +15,6 @@ import json
 import os
 import hashlib
 import secrets
-
-
 
 ARCHIVO = "usuarios_escolares.json"
 
