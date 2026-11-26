@@ -1,13 +1,6 @@
-
-'''
-1.- No esta agregado aqui el script de la base de datos para yo poderlo copiar y pegar en xampp y crear la base de datos, 
-de lo contrrio no se puede continuar con la revisión y hacer pruebas.
-2.- Por que no utilizan BD, al yo crear un nuevo usuario, se crea un archivo JSON y no esta correcto. 
-
-'''
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, time as hora_t
 import calendar
 import unicodedata
 import tempfile
@@ -15,6 +8,14 @@ import json
 import os
 import hashlib
 import secrets
+import html as html_lib
+import webbrowser
+from pathlib import Path
+import mysql.connector
+from mysql.connector import Error
+import fitz
+from PIL import Image, ImageTk
+
 
 ARCHIVO = "usuarios_escolares.json"
 
@@ -34,37 +35,129 @@ VERDE_CLARO = "#E5F5EF"
 ROJO_SUAVE = "#FCEBEC"
 
 
-def cargar_usuarios():
-    if os.path.exists(ARCHIVO):
+def conectar_bd():
+    try:
+        return mysql.connector.connect(
+            host="localhost",
+            user="root",
+            password="",
+            database="escuela_nezagualtcoyot",
+            port=3306
+        )
+    except Error as error:
+        print(f"Error al conectar a MySQL: {error}")
+        return None
+
+
+def _crear_tabla_historial(conexion):
+    cursor = conexion.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS historial_registros (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            fecha DATE NOT NULL,
+            tipo VARCHAR(60) NOT NULL,
+            detalle TEXT NOT NULL,
+            grupo VARCHAR(30),
+            quien VARCHAR(120)
+        ) ENGINE=InnoDB
+    """)
+    cursor.close()
+
+
+def _fecha_sql(valor):
+    if isinstance(valor, datetime):
+        return valor.date()
+    if isinstance(valor, date):
+        return valor
+    if not valor or str(valor).strip() in ("—", "-"):
+        return None
+    for formato in ("%d/%m/%Y", "%Y-%m-%d"):
         try:
-            with open(ARCHIVO, "r", encoding="utf-8") as archivo:
-                datos = json.load(archivo)
-                if isinstance(datos, dict):
-                    return datos
-        except (OSError, json.JSONDecodeError):
-            messagebox.showerror(
-                "Error",
-                "No se pudo leer el archivo de usuarios."
-            )
-    return {}
+            return datetime.strptime(str(valor).strip(), formato).date()
+        except ValueError:
+            pass
+    return None
+
+
+def _fecha_texto(valor):
+    if not valor:
+        return ""
+    if isinstance(valor, datetime):
+        valor = valor.date()
+    if isinstance(valor, date):
+        return valor.strftime("%d/%m/%Y")
+    return str(valor)
+
+
+def _valor_bd(valor):
+    texto = "" if valor is None else str(valor).strip()
+    return None if texto in ("", "—", "-") else texto
+
+
+def _hora_sql(valor):
+    texto = _valor_bd(valor)
+    if not texto:
+        return None
+    for formato in ("%H:%M", "%H:%M:%S"):
+        try:
+            return datetime.strptime(texto, formato).time()
+        except ValueError:
+            pass
+    return None
+
+
+def cargar_usuarios():
+    conexion = conectar_bd()
+    if conexion is None:
+        return {}
+    cursor = None
+    try:
+        cursor = conexion.cursor(dictionary=True)
+        cursor.execute("SELECT usuario, sal, hash, rol FROM usuarios")
+        return {
+            fila["usuario"]: {
+                "sal": fila["sal"],
+                "hash": fila["hash"],
+                "rol": fila["rol"]
+            }
+            for fila in cursor.fetchall()
+        }
+    except Error as error:
+        messagebox.showerror("Error de base de datos", str(error))
+        return {}
+    finally:
+        if cursor:
+            cursor.close()
+        conexion.close()
 
 
 def guardar_usuarios():
-    try:
-        with open(ARCHIVO, "w", encoding="utf-8") as archivo:
-            json.dump(
-                usuarios_guardados,
-                archivo,
-                indent=4,
-                ensure_ascii=False
-            )
-        return True
-    except OSError:
-        messagebox.showerror(
-            "Error",
-            "No se pudieron guardar los datos."
-        )
+    conexion = conectar_bd()
+    if conexion is None:
+        messagebox.showerror("Error", "No se pudo conectar con MySQL.")
         return False
+    cursor = None
+    try:
+        cursor = conexion.cursor()
+        for usuario, datos in usuarios_guardados.items():
+            cursor.execute("""
+                INSERT INTO usuarios (usuario, sal, hash, rol)
+                VALUES (%s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    sal = VALUES(sal),
+                    hash = VALUES(hash),
+                    rol = VALUES(rol)
+            """, (usuario, datos["sal"], datos["hash"], datos.get("rol", "Maestro")))
+        conexion.commit()
+        return True
+    except Error as error:
+        conexion.rollback()
+        messagebox.showerror("Error al guardar usuarios", str(error))
+        return False
+    finally:
+        if cursor:
+            cursor.close()
+        conexion.close()
 
 
 def crear_hash(contrasena, sal=None):
@@ -197,13 +290,6 @@ def entrar():
 
 
 def desplazar_contenido_con_rueda(event, lienzo):
-    """Desplaza `lienzo` con la rueda solo si el puntero está sobre su área.
-
-    - Ignora el puntero cuando está en el menú lateral, el encabezado u
-      otra ventana (por ejemplo la lista desplegable de un Combobox).
-    - Si el puntero está sobre una tabla, lista o cuadro de texto que tiene
-      su propio desplazamiento, esa tabla se mueve sola y la página no.
-    """
     try:
         if lienzo is None or not lienzo.winfo_exists():
             return
@@ -252,7 +338,6 @@ DIAS_SEMANA = ["Lu", "Ma", "Mi", "Ju", "Vi", "Sá", "Do"]
 
 
 def normalizar_texto(texto):
-    """Minúsculas y sin acentos, para buscar 'lopez' y encontrar 'López'."""
     texto = unicodedata.normalize("NFD", texto)
     return "".join(
         c for c in texto if unicodedata.category(c) != "Mn"
@@ -260,7 +345,6 @@ def normalizar_texto(texto):
 
 
 class SelectorFecha(tk.Frame):
-    """Campo de fecha (dd/mm/aaaa) que abre un calendario al hacer clic."""
 
     def __init__(
         self, parent, inicial=None, fuente=("Segoe UI", 10),
@@ -453,7 +537,6 @@ class SelectorFecha(tk.Frame):
 
 
 class BuscadorAlumno(tk.Frame):
-    """Campo con buscador: escribes y se filtran los nombres de la lista."""
 
     def __init__(
         self, parent, nombres, fuente=("Segoe UI", 10),
@@ -551,7 +634,7 @@ class BuscadorAlumno(tk.Frame):
     def _al_destruir(self, event):
         if event.widget is self:
             self._cerrar_popup()
- 
+
     def _al_teclear(self, event):
         if event.keysym in (
             "Down", "Up", "Return", "KP_Enter", "Escape", "Tab",
@@ -659,6 +742,1069 @@ class BuscadorAlumno(tk.Frame):
         return "break"
 
 
+def buscar_pdf():
+    base = Path(__file__).resolve().parent
+    for carpeta in (base, base.parent, Path.cwd()):
+        ruta = carpeta / "diccionario.pdf"
+        if ruta.exists():
+            return ruta
+    return None
+
+
+class VisorPDF(tk.Frame):
+
+    def __init__(
+        self, parent, fondo="#F3F6FB", tarjeta="#FFFFFF", borde="#E1E8F0",
+        acento="#3478F6", acento_oscuro="#2359C4", acento_claro="#E8F0FF",
+        texto="#172B4D", suave="#718096"
+    ):
+        super().__init__(parent, bg=fondo)
+        self.fondo, self.tarjeta, self.borde = fondo, tarjeta, borde
+        self.acento, self.acento_oscuro = acento, acento_oscuro
+        self.acento_claro, self.texto, self.suave = acento_claro, texto, suave
+        self.zoom = 1.1
+        self.ruta = None
+        self.imagenes = []
+
+        barra = tk.Frame(self, bg=fondo)
+        barra.pack(fill="x", pady=(0, 10))
+
+        self.info = tk.Label(
+            barra, text="", bg=fondo, fg=suave, font=("Arial", 9, "bold")
+        )
+        self.info.pack(side="left")
+
+        def boton(texto_b, comando, claro=False):
+            return tk.Button(
+                barra, text=texto_b, command=comando,
+                bg=acento_claro if claro else acento,
+                fg=acento_oscuro if claro else "#FFFFFF",
+                activebackground=acento_oscuro, activeforeground="#FFFFFF",
+                font=("Arial", 9, "bold"), relief="flat", bd=0,
+                cursor="hand2", padx=12, pady=6
+            )
+
+        boton("＋", lambda: self.cambiar_zoom(0.15)).pack(side="right", padx=(0, 8))
+        boton("－", lambda: self.cambiar_zoom(-0.15)).pack(side="right", padx=(0, 8))
+
+        self.paginas = tk.Frame(self, bg=fondo)
+        self.paginas.pack(fill="x")
+
+        ruta_pdf = buscar_pdf()
+        if ruta_pdf:
+            self.cargar(str(ruta_pdf))
+        else:
+            self._mensaje(
+                "No se encontró «diccionario.pdf».\n"
+                "Pulsa «Elegir otro PDF» para buscarlo."
+            )
+
+    def _mensaje(self, texto):
+        for w in self.paginas.winfo_children():
+            w.destroy()
+        self.imagenes.clear()
+        tk.Label(
+            self.paginas, text=texto, bg=self.tarjeta, fg=self.suave,
+            font=("Arial", 10), highlightbackground=self.borde,
+            highlightthickness=1, pady=30
+        ).pack(fill="x")
+
+    def elegir_pdf(self):
+        ruta = filedialog.askopenfilename(
+            title="Selecciona el diccionario en PDF",
+            filetypes=[("Archivos PDF", "*.pdf")]
+        )
+        if ruta:
+            self.cargar(ruta)
+
+    def cargar(self, ruta):
+        self.ruta = ruta
+        self._dibujar()
+
+    def cambiar_zoom(self, delta):
+        self.zoom = max(0.5, min(2.5, self.zoom + delta))
+        if self.ruta:
+            self._dibujar()
+
+    def abrir_externo(self):
+        if not self.ruta:
+            messagebox.showwarning("Sin PDF", "Todavía no hay un PDF cargado.")
+            return
+        try:
+            if hasattr(os, "startfile"):
+                os.startfile(self.ruta)
+            else:
+                webbrowser.open(Path(self.ruta).as_uri())
+        except OSError as error:
+            messagebox.showerror("Error", f"No se pudo abrir el PDF:\n{error}")
+
+    def _dibujar(self):
+        for w in self.paginas.winfo_children():
+            w.destroy()
+        self.imagenes.clear()
+        try:
+            with fitz.open(self.ruta) as doc:
+                total = len(doc)
+                matriz = fitz.Matrix(self.zoom, self.zoom)
+                for numero, pagina in enumerate(doc, start=1):
+                    pix = pagina.get_pixmap(matrix=matriz, alpha=False)
+                    img = Image.frombytes(
+                        "RGB", (pix.width, pix.height), pix.samples
+                    )
+                    foto = ImageTk.PhotoImage(img)
+                    self.imagenes.append(foto)
+
+                    marco = tk.Frame(
+                        self.paginas, bg=self.tarjeta,
+                        highlightbackground=self.borde, highlightthickness=1
+                    )
+                    marco.pack(pady=8)
+                    tk.Label(marco, image=foto, bg=self.tarjeta, bd=0).pack()
+                    tk.Label(
+                        marco, text=f"Página {numero} de {total}",
+                        bg=self.tarjeta, fg=self.suave, font=("Arial", 8)
+                    ).pack(pady=(2, 6))
+            self.info.config(
+                text=f"{Path(self.ruta).name}  ·  {total} páginas  ·  "
+                     f"Zoom {int(self.zoom * 100)}%"
+            )
+        except Exception as error:
+            self.info.config(text="")
+            self._mensaje(f"No se pudo abrir el PDF:\n{error}")
+
+
+ARCHIVO_DATOS = "datos_escolares.json"
+UMBRAL_ALERTA = 3
+TIPOS_INCIDENCIA = ["Conducta", "Académico", "Incidente", "Otro"]
+DIAS_ABREV = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
+
+
+def _datos_vacios():
+    return {
+        "grupos": {},
+        "docentes": [],
+        "asistencias": {},
+        "justificantes": [],
+        "incidencias": [],
+        "cartas": [],
+        "historial": [],
+        "notificadas": [],
+        "director": {}
+    }
+
+
+def cargar_datos():
+    datos = _datos_vacios()
+    conexion = conectar_bd()
+    if conexion is None:
+        return datos
+    cursor = None
+    try:
+        _crear_tabla_historial(conexion)
+        cursor = conexion.cursor(dictionary=True)
+
+        cursor.execute("SELECT id, nombre, docente_id FROM grupos ORDER BY nombre")
+        grupos_db = cursor.fetchall()
+        grupo_por_id = {fila["id"]: fila["nombre"] for fila in grupos_db}
+        datos["grupos"] = {fila["nombre"]: [] for fila in grupos_db}
+
+        cursor.execute("""
+            SELECT p.*, g.nombre AS grado, u.usuario AS usuario_cuenta
+            FROM personal p
+            LEFT JOIN grupos g ON g.docente_id = p.id
+            LEFT JOIN usuarios u ON u.personal_id = p.id
+            WHERE p.rol = 'Maestro'
+            ORDER BY p.nombre
+        """)
+        for fila in cursor.fetchall():
+            datos["docentes"].append({
+                "numero": fila.get("numero_empleado") or "",
+                "nombre": fila.get("nombre") or "",
+                "puesto": fila.get("puesto") or "Docente de primaria",
+                "grado": fila.get("grado") or "—",
+                "entrada": fila.get("hora_entrada").strftime("%H:%M") if fila.get("hora_entrada") else "—",
+                "salida": fila.get("hora_salida").strftime("%H:%M") if fila.get("hora_salida") else "—",
+                "telefono": fila.get("telefono") or "—",
+                "contacto_nombre": fila.get("contacto_emergencia") or "—",
+                "emergencia": fila.get("tel_emergencia") or "—",
+                "contacto": fila.get("relacion_contacto") or "—",
+                "seguro": fila.get("seguro") or "—",
+                "ingreso": _fecha_texto(fila.get("fecha_ingreso")) or "—",
+                "usuario": fila.get("usuario_cuenta") or "—",
+                "estado": fila.get("estado") or "En servicio"
+            })
+
+        cursor.execute("""
+            SELECT a.nombre, a.activo, g.nombre AS grupo
+            FROM alumnos a JOIN grupos g ON g.id = a.grupo_id
+            ORDER BY g.nombre, a.nombre
+        """)
+        for fila in cursor.fetchall():
+            if fila["grupo"] in datos["grupos"] and fila["activo"]:
+                datos["grupos"][fila["grupo"]].append(fila["nombre"])
+
+        cursor.execute("""
+            SELECT s.fecha, s.estado, a.nombre AS alumno
+            FROM asistencias s JOIN alumnos a ON a.id = s.alumno_id
+        """)
+        for fila in cursor.fetchall():
+            fecha = _fecha_texto(fila["fecha"])
+            datos["asistencias"].setdefault(fecha, {})[fila["alumno"]] = fila["estado"]
+
+        cursor.execute("""
+            SELECT j.fecha_ausencia AS fecha, j.tipo, j.motivo,
+                   a.nombre AS alumno, g.nombre AS grupo, p.nombre AS registro
+            FROM justificantes j
+            JOIN alumnos a ON a.id = j.alumno_id
+            JOIN grupos g ON g.id = a.grupo_id
+            LEFT JOIN personal p ON p.id = j.registrado_por
+            ORDER BY j.id
+        """)
+        datos["justificantes"] = [{
+            "fecha": _fecha_texto(f["fecha"]), "alumno": f["alumno"],
+            "grupo": f["grupo"], "tipo": f["tipo"], "motivo": f["motivo"],
+            "registro": f["registro"] or "—"
+        } for f in cursor.fetchall()]
+
+        cursor.execute("""
+            SELECT i.fecha, i.tipo, i.prioridad, i.descripcion AS motivo,
+                   a.nombre AS alumno, g.nombre AS grupo, p.nombre AS registro
+            FROM incidencias i
+            JOIN alumnos a ON a.id = i.alumno_id
+            JOIN grupos g ON g.id = a.grupo_id
+            LEFT JOIN personal p ON p.id = i.registrado_por
+            ORDER BY i.id
+        """)
+        datos["incidencias"] = [{
+            "fecha": _fecha_texto(f["fecha"]), "alumno": f["alumno"],
+            "grupo": f["grupo"], "tipo": f["tipo"],
+            "prioridad": f["prioridad"], "motivo": f["motivo"],
+            "registro": f["registro"] or "—"
+        } for f in cursor.fetchall()]
+
+        cursor.execute("""
+            SELECT c.fecha, c.tutor, c.motivo, c.acuerdos,
+                   a.nombre AS alumno, g.nombre AS grupo
+            FROM cartas_compromiso c
+            JOIN alumnos a ON a.id = c.alumno_id
+            JOIN grupos g ON g.id = c.grupo_id
+            ORDER BY c.id
+        """)
+        datos["cartas"] = [{
+            "fecha": _fecha_texto(f["fecha"]), "alumno": f["alumno"],
+            "grupo": f["grupo"], "tutor": f["tutor"],
+            "motivo": f["motivo"], "acuerdos": f["acuerdos"]
+        } for f in cursor.fetchall()]
+
+        cursor.execute("""
+            SELECT fecha, tipo, detalle, grupo, quien
+            FROM historial_registros ORDER BY id
+        """)
+        datos["historial"] = [{
+            "fecha": _fecha_texto(f["fecha"]), "tipo": f["tipo"],
+            "detalle": f["detalle"], "grupo": f["grupo"] or "—",
+            "quien": f["quien"] or "—"
+        } for f in cursor.fetchall()]
+
+        cursor.execute("SELECT nombre, numero_empleado, puesto, telefono, estado FROM personal WHERE rol = 'Director' LIMIT 1")
+        director = cursor.fetchone()
+        if director:
+            datos["director"] = {
+                "nombre": director["nombre"], "numero": director["numero_empleado"],
+                "puesto": director["puesto"], "telefono": director["telefono"] or "—",
+                "estado": director["estado"]
+            }
+
+        conteos = {}
+        for registros in datos["asistencias"].values():
+            for alumno, estado in registros.items():
+                if estado in ("Retardo", "Faltó"):
+                    conteos[alumno] = conteos.get(alumno, 0) + 1
+        datos["notificadas"] = [a for a, total in conteos.items() if total >= UMBRAL_ALERTA]
+        return datos
+    except Error as error:
+        messagebox.showerror("Error al cargar la base de datos", str(error))
+        return datos
+    finally:
+        if cursor:
+            cursor.close()
+        conexion.close()
+
+
+DATOS = cargar_datos()
+
+
+def guardar_datos():
+    conexion = conectar_bd()
+    if conexion is None:
+        messagebox.showerror("Error", "No se pudo conectar con MySQL. Los cambios no se guardaron.")
+        return False
+    cursor = None
+    try:
+        _crear_tabla_historial(conexion)
+        cursor = conexion.cursor()
+
+        cursor.execute("DELETE FROM historial_registros")
+        cursor.execute("DELETE FROM asistencias")
+        cursor.execute("DELETE FROM justificantes")
+        cursor.execute("DELETE FROM incidencias")
+        cursor.execute("DELETE FROM cartas_compromiso")
+        cursor.execute("DELETE FROM alumnos")
+        cursor.execute("DELETE FROM grupos")
+        cursor.execute("DELETE FROM personal")
+
+        personal_ids = {}
+        numeros_usados = set()
+        for docente in DATOS["docentes"]:
+            numero = _valor_bd(docente.get("numero")) or f"EMP-{len(personal_ids) + 1:03d}"
+            consecutivo = len(personal_ids) + 1
+            while numero in numeros_usados:
+                consecutivo += 1
+                numero = f"EMP-{consecutivo:03d}"
+            numeros_usados.add(numero)
+            cursor.execute("""
+                INSERT INTO personal
+                (numero_empleado, nombre, puesto, rol, telefono,
+                 contacto_emergencia, tel_emergencia, relacion_contacto,
+                 seguro, hora_entrada, hora_salida, fecha_ingreso, estado)
+                VALUES (%s, %s, %s, 'Maestro', %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                numero, docente.get("nombre", "Docente"),
+                docente.get("puesto", "Docente de primaria"),
+                _valor_bd(docente.get("telefono")),
+                _valor_bd(docente.get("contacto_nombre")),
+                _valor_bd(docente.get("emergencia")),
+                _valor_bd(docente.get("contacto")),
+                _valor_bd(docente.get("seguro")),
+                _hora_sql(docente.get("entrada")), _hora_sql(docente.get("salida")),
+                _fecha_sql(docente.get("ingreso")),
+                docente.get("estado") if docente.get("estado") in ("En servicio", "Baja", "Licencia") else "En servicio"
+            ))
+            personal_ids[docente.get("nombre", "")] = cursor.lastrowid
+
+        for docente in DATOS["docentes"]:
+            usuario = _valor_bd(docente.get("usuario"))
+            if usuario and usuario != "—" and docente.get("nombre") in personal_ids:
+                cursor.execute("UPDATE usuarios SET personal_id = %s WHERE usuario = %s", (personal_ids[docente["nombre"]], usuario))
+
+        grupo_ids = {}
+        for grupo in DATOS["grupos"]:
+            docente_id = next((personal_ids[d.get("nombre", "")] for d in DATOS["docentes"] if d.get("grado") == grupo and d.get("nombre") in personal_ids), None)
+            cursor.execute("INSERT INTO grupos (nombre, docente_id) VALUES (%s, %s)", (grupo, docente_id))
+            grupo_ids[grupo] = cursor.lastrowid
+
+        alumno_ids = {}
+        for grupo, alumnos in DATOS["grupos"].items():
+            for nombre in alumnos:
+                cursor.execute("INSERT INTO alumnos (nombre, grupo_id, activo) VALUES (%s, %s, 1)", (nombre, grupo_ids[grupo]))
+                alumno_ids[(grupo, nombre)] = cursor.lastrowid
+
+        def id_alumno(nombre, grupo=None):
+            if grupo and (grupo, nombre) in alumno_ids:
+                return alumno_ids[(grupo, nombre)]
+            for (g, n), identificador in alumno_ids.items():
+                if n == nombre:
+                    return identificador
+            return None
+
+        def id_personal(nombre):
+            return personal_ids.get(nombre)
+
+        for fecha_texto, registros in DATOS["asistencias"].items():
+            fecha = _fecha_sql(fecha_texto)
+            if not fecha:
+                continue
+            for alumno, estado in registros.items():
+                alumno_id = id_alumno(alumno)
+                if alumno_id and estado in ("Asistió", "Retardo", "Faltó"):
+                    cursor.execute("""
+                        INSERT INTO asistencias (alumno_id, fecha, estado)
+                        VALUES (%s, %s, %s)
+                    """, (alumno_id, fecha, estado))
+
+        for registro in DATOS["justificantes"]:
+            alumno_id = id_alumno(registro.get("alumno"), registro.get("grupo"))
+            fecha = _fecha_sql(registro.get("fecha"))
+            if alumno_id and fecha:
+                tipo = registro.get("tipo") if registro.get("tipo") in ("Enfermedad", "Familiar", "Otro") else "Otro"
+                cursor.execute("""
+                    INSERT INTO justificantes
+                    (alumno_id, fecha_ausencia, tipo, motivo, registrado_por)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (alumno_id, fecha, tipo, registro.get("motivo", "Sin descripción"), id_personal(registro.get("registro"))))
+
+        for registro in DATOS["incidencias"]:
+            alumno_id = id_alumno(registro.get("alumno"), registro.get("grupo"))
+            fecha = _fecha_sql(registro.get("fecha"))
+            if alumno_id and fecha:
+                tipo = registro.get("tipo") if registro.get("tipo") in ("Conducta", "Académico", "Incidente", "Otro") else "Otro"
+                prioridad = registro.get("prioridad") if registro.get("prioridad") in ("Baja", "Media", "Alta") else "Media"
+                cursor.execute("""
+                    INSERT INTO incidencias
+                    (alumno_id, fecha, tipo, prioridad, descripcion, registrado_por)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (alumno_id, fecha, tipo, prioridad, registro.get("motivo", "Sin descripción"), id_personal(registro.get("registro"))))
+
+        for registro in DATOS["cartas"]:
+            alumno_id = id_alumno(registro.get("alumno"), registro.get("grupo"))
+            grupo_id = grupo_ids.get(registro.get("grupo"))
+            fecha = _fecha_sql(registro.get("fecha"))
+            if alumno_id and grupo_id and fecha:
+                cursor.execute("""
+                    INSERT INTO cartas_compromiso
+                    (alumno_id, grupo_id, tutor, fecha, motivo, acuerdos)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (
+                    alumno_id, grupo_id, registro.get("tutor", "Tutor"), fecha,
+                    registro.get("motivo", "No especificado"),
+                    registro.get("acuerdos", "No especificados")
+                ))
+
+        for registro in DATOS["historial"]:
+            fecha = _fecha_sql(registro.get("fecha"))
+            if fecha:
+                cursor.execute("""
+                    INSERT INTO historial_registros (fecha, tipo, detalle, grupo, quien)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (
+                    fecha, registro.get("tipo", "Registro"),
+                    registro.get("detalle", ""), registro.get("grupo", "—"),
+                    registro.get("quien", "—")
+                ))
+
+        conexion.commit()
+        return True
+    except Error as error:
+        conexion.rollback()
+        messagebox.showerror("Error al guardar en MySQL", str(error))
+        return False
+    finally:
+        if cursor:
+            cursor.close()
+        conexion.close()
+
+
+def parse_fecha(texto):
+    try:
+        return datetime.strptime(texto, "%d/%m/%Y").date()
+    except (ValueError, TypeError):
+        return None
+
+
+def hoy_texto():
+    return date.today().strftime("%d/%m/%Y")
+
+
+def todos_alumnos():
+    nombres = {a for lista in DATOS["grupos"].values() for a in lista}
+    return sorted(nombres, key=normalizar_texto)
+
+
+def grupo_de(alumno):
+    for grupo, lista in DATOS["grupos"].items():
+        if alumno in lista:
+            return grupo
+    return ""
+
+
+def buscar_docente(usuario):
+    if not usuario:
+        return None
+    u = normalizar_texto(usuario.strip())
+    for d in DATOS["docentes"]:
+        if u in (
+            normalizar_texto(str(d.get("usuario", ""))),
+            normalizar_texto(str(d.get("nombre", "")))
+        ):
+            return d
+    return None
+
+
+def conteo_alumno(alumno):
+    asistio = retardos = faltas = 0
+    ultima = None
+    for fecha, registros in DATOS["asistencias"].items():
+        estado = registros.get(alumno)
+        if estado == "Asistió":
+            asistio += 1
+        elif estado in ("Retardo", "Faltó"):
+            if estado == "Retardo":
+                retardos += 1
+            else:
+                faltas += 1
+            f = parse_fecha(fecha)
+            if f and (ultima is None or f > ultima):
+                ultima = f
+    return asistio, retardos, faltas, ultima
+
+
+def faltas_acumuladas(alumno):
+    _, retardos, faltas, _ = conteo_alumno(alumno)
+    return retardos + faltas
+
+
+def alumnos_en_alerta(alumnos=None):
+    nombres = alumnos if alumnos is not None else todos_alumnos()
+    resultado = []
+    for nombre in nombres:
+        _, retardos, faltas, ultima = conteo_alumno(nombre)
+        if retardos + faltas >= UMBRAL_ALERTA:
+            resultado.append({
+                "alumno": nombre,
+                "grupo": grupo_de(nombre),
+                "faltas": faltas,
+                "retardos": retardos,
+                "total": retardos + faltas,
+                "ultima": ultima.strftime("%d/%m/%Y") if ultima else ""
+            })
+    return sorted(resultado, key=lambda a: -a["total"])
+
+
+def resumen_alumnos():
+    filas = []
+    for grupo in sorted(DATOS["grupos"]):
+        for nombre in DATOS["grupos"][grupo]:
+            asistio, retardos, faltas, _ = conteo_alumno(nombre)
+            filas.append({
+                "grupo": grupo, "alumno": nombre, "asistio": asistio,
+                "retardo": retardos, "falto": faltas,
+                "total": retardos + faltas
+            })
+    return filas
+
+
+def registrar_historial(tipo, detalle, grupo, quien):
+    DATOS["historial"].append({
+        "fecha": hoy_texto(), "tipo": tipo, "detalle": detalle,
+        "grupo": grupo or "—", "quien": quien or "—"
+    })
+    guardar_datos()
+
+
+def registrar_historial_unico(tipo, detalle, grupo, quien):
+    for h in DATOS["historial"]:
+        if (
+            h.get("fecha") == hoy_texto() and h.get("tipo") == tipo
+            and h.get("detalle") == detalle
+        ):
+            return
+    registrar_historial(tipo, detalle, grupo, quien)
+
+
+def revisar_alerta(alumno, quien):
+    total = faltas_acumuladas(alumno)
+    notificadas = DATOS["notificadas"]
+    if total >= UMBRAL_ALERTA and alumno not in notificadas:
+        notificadas.append(alumno)
+        registrar_historial(
+            "Alerta",
+            f"Alerta de inasistencias · {alumno} ({total} faltas)",
+            grupo_de(alumno), quien
+        )
+        messagebox.showwarning(
+            "Alerta de inasistencias",
+            f"{alumno} acumula {total} faltas "
+            "(los retardos cuentan como falta).\n\n"
+            "Se activó una alerta. Puedes consultarla e imprimirla "
+            "en la sección Alertas."
+        )
+    elif total < UMBRAL_ALERTA and alumno in notificadas:
+        notificadas.remove(alumno)
+        guardar_datos()
+
+
+def guardar_justificante(alumno, fecha, tipo, motivo, quien):
+    reg = {
+        "alumno": alumno, "grupo": grupo_de(alumno), "fecha": fecha,
+        "tipo": tipo, "motivo": motivo, "registro": quien
+    }
+    DATOS["justificantes"].append(reg)
+    registrar_historial("Justificante", f"Justificante de {alumno}", reg["grupo"], quien)
+    return reg
+
+
+def guardar_incidencia(alumno, fecha, tipo, prioridad, motivo, quien):
+    reg = {
+        "alumno": alumno, "grupo": grupo_de(alumno), "fecha": fecha,
+        "tipo": tipo, "prioridad": prioridad, "motivo": motivo,
+        "registro": quien
+    }
+    DATOS["incidencias"].append(reg)
+    registrar_historial(
+        "Incidencia", f"Incidencia de {tipo.lower()} · {alumno}",
+        reg["grupo"], quien
+    )
+    return reg
+
+
+def asistencia_hoy_conteos():
+    alumnos = todos_alumnos()
+    registros = DATOS["asistencias"].get(hoy_texto(), {})
+    estados = [registros.get(a, "") for a in alumnos]
+    p = estados.count("Asistió")
+    r = estados.count("Retardo")
+    f = estados.count("Faltó")
+    return p, r, f, len(alumnos) - p - r - f, len(alumnos)
+
+
+def estado_hoy_partes():
+    p, r, f, pend, _ = asistencia_hoy_conteos()
+    return [
+        ("Asistieron", p, "#16A34A"),
+        ("Retardos", r, "#CA8A04"),
+        ("Faltas", f, "#E11D48"),
+        ("Sin registrar", pend, "#94A3B8")
+    ]
+
+
+def pct_por_grupo():
+    hoy = date.today()
+    resultado = []
+    for grupo in sorted(DATOS["grupos"]):
+        total = presentes = 0
+        for fecha, registros in DATOS["asistencias"].items():
+            f = parse_fecha(fecha)
+            if not f or (f.year, f.month) != (hoy.year, hoy.month):
+                continue
+            for alumno in DATOS["grupos"][grupo]:
+                estado = registros.get(alumno)
+                if estado:
+                    total += 1
+                    if estado == "Asistió":
+                        presentes += 1
+        if total:
+            resultado.append((grupo, round(100 * presentes / total)))
+    return resultado
+
+
+def pct_semana():
+    fechas = sorted(
+        (parse_fecha(f), f) for f in DATOS["asistencias"] if parse_fecha(f)
+    )
+    resultado = []
+    for f, texto in fechas[-5:]:
+        estados = [e for e in DATOS["asistencias"][texto].values() if e]
+        if estados:
+            resultado.append((
+                f"{DIAS_ABREV[f.weekday()]} {f.day:02d}",
+                round(100 * estados.count("Asistió") / len(estados))
+            ))
+    return resultado
+
+
+def incidencias_por_tipo():
+    return [
+        (tipo, sum(1 for i in DATOS["incidencias"] if i.get("tipo") == tipo))
+        for tipo in TIPOS_INCIDENCIA
+    ]
+
+
+ESTILO_IMPRESION = (
+    "<style>"
+    "body{font-family:Arial,Helvetica,sans-serif;color:#172B4D;margin:30px;}"
+    "h1{font-size:20px;margin:0;}"
+    "h2{font-size:16px;margin:16px 0 2px;}"
+    ".sub{color:#555;font-size:12px;margin:0 0 16px;}"
+    "table{border-collapse:collapse;width:100%;font-size:12px;}"
+    "th{background:#EDF2F8;text-align:left;}"
+    "th,td{border:1px solid #cfd8e3;padding:6px 8px;vertical-align:top;}"
+    ".campo{margin:6px 0;font-size:14px;}"
+    ".texto{margin:6px 0 0;font-size:14px;white-space:pre-wrap;"
+    "border:1px solid #cfd8e3;padding:10px;min-height:70px;}"
+    ".firmas{display:flex;gap:40px;margin-top:80px;}"
+    ".firma{flex:1;border-top:1px solid #000;text-align:center;"
+    "padding-top:6px;font-size:12px;}"
+    "@media print{@page{margin:14mm;}}"
+    "</style>"
+)
+
+
+def _esc(valor):
+    return html_lib.escape("" if valor is None else str(valor))
+
+
+def _encabezado_doc(titulo, subtitulo=""):
+    partes = [subtitulo] if subtitulo else []
+    partes.append("Impreso el " + hoy_texto())
+    return (
+        "<h1>PRIMARIA NEZAHUALCÓYOTL</h1><h2>" + _esc(titulo) + "</h2>"
+        "<div class='sub'>" + _esc("  ·  ".join(partes)) + "</div>"
+    )
+
+
+def imprimir_html(titulo, cuerpo):
+    documento = (
+        "<!DOCTYPE html><html lang='es'><head><meta charset='utf-8'><title>"
+        + _esc(titulo) + "</title>" + ESTILO_IMPRESION + "</head><body>"
+        + cuerpo
+        + "<script>window.onload=function(){setTimeout(function(){"
+        "window.print();},300);};</script></body></html>"
+    )
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".html",
+            prefix="impresion_", delete=False
+        ) as archivo:
+            archivo.write(documento)
+            ruta = archivo.name
+        webbrowser.open(Path(ruta).as_uri())
+    except OSError as error:
+        messagebox.showerror(
+            "No se pudo imprimir", f"No fue posible preparar la impresión.\n\n{error}"
+        )
+
+
+def imprimir_tabla(titulo, subtitulo, columnas, filas):
+    if not filas:
+        messagebox.showinfo("Sin registros", "No hay registros para imprimir.")
+        return
+    cabecera = "".join(f"<th>{_esc(c)}</th>" for c in columnas)
+    cuerpo = "".join(
+        "<tr>" + "".join(f"<td>{_esc(v)}</td>" for v in fila) + "</tr>"
+        for fila in filas
+    )
+    imprimir_html(
+        titulo,
+        _encabezado_doc(titulo, subtitulo)
+        + f"<table><tr>{cabecera}</tr>{cuerpo}</table>"
+        + f"<div class='sub' style='margin-top:10px'>Total: {len(filas)} registro(s)</div>"
+    )
+
+
+def imprimir_documento(titulo, campos, etiqueta_texto, texto, firmas):
+    cuerpo = _encabezado_doc(titulo)
+    for nombre, valor in campos:
+        cuerpo += f"<div class='campo'><b>{_esc(nombre)}:</b> {_esc(valor or '—')}</div>"
+    if texto is not None:
+        cuerpo += f"<h2>{_esc(etiqueta_texto)}</h2><div class='texto'>{_esc(texto)}</div>"
+    cuerpo += "<div class='firmas'>" + "".join(
+        f"<div class='firma'>{_esc(f)}</div>" for f in firmas
+    ) + "</div>"
+    imprimir_html(titulo, cuerpo)
+
+
+def imprimir_justificante(reg):
+    imprimir_documento(
+        "Justificante de inasistencia",
+        [
+            ("Alumno", reg.get("alumno")), ("Grupo", reg.get("grupo")),
+            ("Fecha de la ausencia", reg.get("fecha")),
+            ("Tipo de justificante", reg.get("tipo")),
+            ("Registrado por", reg.get("registro"))
+        ],
+        "Motivo", reg.get("motivo", ""),
+        ["Firma del padre, madre o tutor", "Firma del docente", "Sello y firma de la dirección"]
+    )
+
+
+def imprimir_incidencia(reg):
+    imprimir_documento(
+        "Reporte de incidencia",
+        [
+            ("Alumno", reg.get("alumno")), ("Grupo", reg.get("grupo")),
+            ("Fecha", reg.get("fecha")), ("Tipo", reg.get("tipo")),
+            ("Prioridad", reg.get("prioridad")),
+            ("Registrado por", reg.get("registro"))
+        ],
+        "Descripción", reg.get("motivo", ""),
+        ["Firma del padre, madre o tutor", "Firma del docente", "Sello y firma de la dirección"]
+    )
+
+
+def imprimir_alerta(alerta):
+    imprimir_documento(
+        "Alerta de inasistencias",
+        [
+            ("Alumno", alerta.get("alumno")), ("Grupo", alerta.get("grupo")),
+            ("Faltas", alerta.get("faltas")), ("Retardos", alerta.get("retardos")),
+            ("Total de faltas acumuladas", alerta.get("total")),
+            ("Última fecha", alerta.get("ultima"))
+        ],
+        "Observaciones",
+        f"El alumno alcanzó el límite de {UMBRAL_ALERTA} faltas acumuladas "
+        "(un retardo cuenta como falta). Se solicita dar seguimiento con el "
+        "padre, madre o tutor.",
+        ["Firma del padre, madre o tutor", "Firma del docente", "Sello y firma de la dirección"]
+    )
+
+
+def imprimir_alertas(alertas, grupo=""):
+    imprimir_tabla(
+        "Alertas de inasistencias",
+        f"Grupo {grupo}" if grupo else "Todos los grupos",
+        ["Grupo", "Alumno", "Faltas", "Retardos", "Total de faltas", "Última fecha"],
+        [
+            (a["grupo"] or "—", a["alumno"], a["faltas"], a["retardos"],
+             a["total"], a["ultima"] or "—")
+            for a in alertas
+        ]
+    )
+
+
+def imprimir_registros(tipo, grupo=None):
+    if tipo == "justificantes":
+        registros, titulo = DATOS["justificantes"], "Justificantes registrados"
+        columnas = ["Fecha", "Alumno", "Grupo", "Tipo", "Motivo", "Registró"]
+        campos = ("fecha", "alumno", "grupo", "tipo", "motivo", "registro")
+    else:
+        registros, titulo = DATOS["incidencias"], "Incidencias registradas"
+        columnas = ["Fecha", "Alumno", "Grupo", "Tipo", "Prioridad", "Descripción", "Registró"]
+        campos = ("fecha", "alumno", "grupo", "tipo", "prioridad", "motivo", "registro")
+    if grupo in DATOS["grupos"]:
+        registros = [r for r in registros if r.get("grupo") == grupo]
+    imprimir_tabla(
+        titulo, f"Grupo {grupo}" if grupo in DATOS["grupos"] else "Todos los grupos",
+        columnas, [tuple(r.get(c, "") for c in campos) for r in registros]
+    )
+
+
+def imprimir_docentes():
+    imprimir_tabla(
+        "Directorio docente", "",
+        ["N.º empleado", "Docente", "Puesto", "Grupo", "Entrada", "Salida", "Teléfono"],
+        [
+            (d.get("numero"), d.get("nombre"), d.get("puesto"), d.get("grado"),
+             d.get("entrada"), d.get("salida"), d.get("telefono"))
+            for d in DATOS["docentes"]
+        ]
+    )
+
+
+def _falta_openpyxl():
+    messagebox.showerror(
+        "Falta una librería",
+        "Para usar Excel instala openpyxl:\n\npip install openpyxl"
+    )
+
+
+def exportar_excel(columnas, filas, titulo):
+    try:
+        from openpyxl import Workbook
+    except ImportError:
+        _falta_openpyxl()
+        return False
+    if not filas:
+        messagebox.showinfo("Sin registros", "No hay registros para exportar.")
+        return False
+    ruta = filedialog.asksaveasfilename(
+        title="Exportar a Excel", defaultextension=".xlsx",
+        filetypes=[("Libro de Excel", "*.xlsx")],
+        initialfile=normalizar_texto(titulo).replace(" ", "_") + ".xlsx"
+    )
+    if not ruta:
+        return False
+    libro = Workbook()
+    hoja = libro.active
+    hoja.title = "Datos"
+    hoja.append(list(columnas))
+    for fila in filas:
+        hoja.append(list(fila))
+    try:
+        libro.save(ruta)
+    except OSError as error:
+        messagebox.showerror("Error al guardar", f"No se pudo guardar el archivo:\n{error}")
+        return False
+    messagebox.showinfo("Exportado", "El archivo de Excel se guardó correctamente.")
+    return True
+
+
+COLUMNAS_PLANTILLA = {
+    "alumnos": ["Nombre", "Grupo"],
+    "docentes": [
+        "Nombre", "Grupo", "Puesto", "Entrada", "Salida", "Teléfono",
+        "Nombre del contacto", "Teléfono de emergencia", "Relación del contacto",
+        "Afiliación médica", "Fecha de ingreso", "Usuario", "Número de empleado"
+    ]
+}
+
+
+def descargar_plantilla(tipo):
+    try:
+        from openpyxl import Workbook
+    except ImportError:
+        _falta_openpyxl()
+        return
+    ruta = filedialog.asksaveasfilename(
+        title="Guardar plantilla de Excel", defaultextension=".xlsx",
+        filetypes=[("Libro de Excel", "*.xlsx")],
+        initialfile=f"plantilla_{tipo}.xlsx"
+    )
+    if not ruta:
+        return
+    libro = Workbook()
+    hoja = libro.active
+    hoja.title = tipo.capitalize()
+    hoja.append(COLUMNAS_PLANTILLA[tipo])
+    try:
+        libro.save(ruta)
+        messagebox.showinfo(
+            "Plantilla guardada",
+            "Llena la plantilla (una fila por persona) y cárgala con "
+            "«Carga masiva (Excel)»."
+        )
+    except OSError as error:
+        messagebox.showerror("Error al guardar", f"No se pudo guardar la plantilla:\n{error}")
+
+
+def _leer_filas_excel(ruta):
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        _falta_openpyxl()
+        return None
+    try:
+        libro = load_workbook(ruta, read_only=True, data_only=True)
+        filas = list(libro.active.iter_rows(values_only=True))
+        libro.close()
+    except Exception as error:
+        messagebox.showerror("Error", f"No se pudo leer el archivo de Excel:\n{error}")
+        return None
+    if len(filas) < 2:
+        messagebox.showwarning(
+            "Archivo vacío",
+            "El archivo no tiene filas de datos. La primera fila debe tener los "
+            "encabezados y las siguientes los registros."
+        )
+        return None
+    encabezados = [normalizar_texto(str(c or "")).strip() for c in filas[0]]
+    resultado = []
+    for fila in filas[1:]:
+        if not any(c not in (None, "") for c in fila):
+            continue
+        registro = {}
+        for i, encabezado in enumerate(encabezados):
+            if not encabezado or i >= len(fila):
+                continue
+            valor = fila[i]
+            if valor is None:
+                texto = ""
+            elif isinstance(valor, date):
+                texto = valor.strftime("%d/%m/%Y")
+            elif isinstance(valor, hora_t):
+                texto = valor.strftime("%H:%M")
+            elif isinstance(valor, float) and valor.is_integer():
+                texto = str(int(valor))
+            else:
+                texto = str(valor).strip()
+            registro[encabezado] = texto
+        resultado.append(registro)
+    return resultado
+
+
+def _campo(registro, *nombres):
+    for nombre in nombres:
+        valor = registro.get(nombre)
+        if valor:
+            return " ".join(valor.split())
+    return ""
+
+
+def importar_alumnos_excel():
+    ruta = filedialog.askopenfilename(
+        title="Selecciona el Excel con los alumnos",
+        filetypes=[("Libro de Excel", "*.xlsx *.xlsm"), ("Todos los archivos", "*.*")]
+    )
+    if not ruta:
+        return 0
+    filas = _leer_filas_excel(ruta)
+    if filas is None:
+        return 0
+    agregados = duplicados = invalidos = 0
+    for fila in filas:
+        nombre = _campo(fila, "nombre", "alumno", "nombre del alumno", "nombre completo")
+        if not nombre:
+            nombre = " ".join(filter(None, [
+                _campo(fila, "nombres", "nombre(s)"),
+                _campo(fila, "apellido paterno"),
+                _campo(fila, "apellido materno")
+            ]))
+        grupo = _campo(fila, "grupo", "grado", "grado y grupo").upper()
+        if not nombre or not grupo:
+            invalidos += 1
+            continue
+        lista = DATOS["grupos"].setdefault(grupo, [])
+        if any(a.casefold() == nombre.casefold() for a in lista):
+            duplicados += 1
+            continue
+        lista.append(nombre)
+        agregados += 1
+    if agregados:
+        guardar_datos()
+    messagebox.showinfo(
+        "Carga masiva de alumnos",
+        f"Alumnos agregados: {agregados}\n"
+        f"Ya existían en el grupo: {duplicados}\n"
+        f"Filas sin nombre o sin grupo: {invalidos}\n\n"
+        "Columnas esperadas: Nombre y Grupo."
+    )
+    return agregados
+
+
+def importar_docentes_excel():
+    ruta = filedialog.askopenfilename(
+        title="Selecciona el Excel con los docentes",
+        filetypes=[("Libro de Excel", "*.xlsx *.xlsm"), ("Todos los archivos", "*.*")]
+    )
+    if not ruta:
+        return 0
+    filas = _leer_filas_excel(ruta)
+    if filas is None:
+        return 0
+    lista = DATOS["docentes"]
+    agregados = actualizados = invalidos = 0
+    for fila in filas:
+        nombre = _campo(fila, "nombre", "docente", "maestro", "nombre completo")
+        if not nombre:
+            invalidos += 1
+            continue
+        grado = _campo(fila, "grupo", "grado", "grado y grupo").upper()
+        registro = {
+            "numero": _campo(fila, "numero de empleado", "numero", "no. de empleado"),
+            "nombre": nombre,
+            "puesto": _campo(fila, "puesto", "cargo") or "Docente de primaria",
+            "grado": grado or "—",
+            "entrada": _campo(fila, "entrada", "hora de entrada") or "—",
+            "salida": _campo(fila, "salida", "hora de salida") or "—",
+            "telefono": _campo(fila, "telefono", "celular") or "—",
+            "contacto_nombre": _campo(fila, "nombre del contacto") or "—",
+            "emergencia": _campo(fila, "telefono de emergencia", "emergencia") or "—",
+            "contacto": _campo(fila, "relacion del contacto", "relacion", "contacto") or "—",
+            "seguro": _campo(fila, "afiliacion medica", "seguro") or "—",
+            "ingreso": _campo(fila, "fecha de ingreso", "ingreso") or "—",
+            "usuario": _campo(fila, "usuario") or "—",
+            "estado": "En servicio"
+        }
+        existente = next(
+            (d for d in lista if d.get("nombre", "").casefold() == nombre.casefold()),
+            None
+        )
+        if existente:
+            existente.update({k: v for k, v in registro.items() if v and v != "—"})
+            actualizados += 1
+        else:
+            if not registro["numero"]:
+                n = len(lista) + 1
+                usados = {d.get("numero") for d in lista}
+                while f"EMP-{n:03d}" in usados:
+                    n += 1
+                registro["numero"] = f"EMP-{n:03d}"
+            lista.append(registro)
+            agregados += 1
+        if grado:
+            DATOS["grupos"].setdefault(grado, [])
+    if agregados or actualizados:
+        guardar_datos()
+    messagebox.showinfo(
+        "Carga masiva de docentes",
+        f"Docentes agregados: {agregados}\n"
+        f"Docentes actualizados: {actualizados}\n"
+        f"Filas sin nombre: {invalidos}\n\n"
+        "Tip: la columna «Usuario» enlaza al docente con su cuenta de "
+        "inicio de sesión y le asigna su grupo."
+    )
+    return agregados + actualizados
+
+
 def abrir_panel_director(root):
     LATERAL = "#0F243E"
     SEL = "#1E3A5F"
@@ -683,127 +1829,22 @@ def abrir_panel_director(root):
     DOC_VERDE_CLARO = "#E0F7ED"
 
     DIRECTOR = {
-        "nombre": "Roberto Hernandez Silva",
+        "nombre": "Director",
         "puesto": "Director del plantel",
-        "numero": "DIR-001",
+        "numero": "—",
         "estado": "En servicio",
-        "correo": "director@plantel.edu.mx",
-        "telefono": "55 8765 4321",
+        "correo": "—",
+        "telefono": "—",
         "plantel": "Primaria Nezahualcoyotl",
         "area": "Dirección escolar",
-        "ingreso": "15/08/2020"
+        "ingreso": "—"
     }
+    DIRECTOR.update(DATOS.get("director", {}))
 
-    ALUMNOS = [
-        "Ana López Martínez",
-        "Carlos Hernández Ruiz",
-        "Sofía García Torres",
-        "Diego Ramírez Flores",
-        "Valeria Sánchez Cruz",
-        "Mateo Flores Díaz",
-        "Camila Torres Reyes",
-        "Emiliano Cruz Morales",
-        "Daniela Ruiz López",
-        "Sebastián Morales Vega"
-    ]
-
-    GRUPOS = ["1° A", "2° A", "3° A", "4° A", "5° A", "6° A"]
-
-    GRUPOS_ALUMNOS = {
-        "1° A": ["Ana López Martínez", "Carlos Hernández Ruiz"],
-        "2° A": ["Valeria Sánchez Cruz", "Mateo Flores Díaz"],
-        "3° A": ["Camila Torres Reyes", "Emiliano Cruz Morales"],
-        "4° A": ["Sofía García Torres", "Diego Ramírez Flores"],
-        "5° A": ["Daniela Ruiz López", "Sebastián Morales Vega"],
-        "6° A": []
-    }
-
-    DOCENTES = [
-        {
-            "numero": "EMP-001",
-            "nombre": "Ana Torres López",
-            "puesto": "Docente de primaria",
-            "grado": "1° A",
-            "entrada": "07:35 a. m.",
-            "salida": "02:00 p. m.",
-            "telefono": "55 0000 0001",
-            "emergencia": "55 0000 0011",
-            "contacto": "Familiar",
-            "seguro": "IMSS",
-            "ingreso": "15/08/2023",
-            "estado": "En servicio"
-        },
-        {
-            "numero": "EMP-002",
-            "nombre": "Carlos Méndez Ruiz",
-            "puesto": "Docente de primaria",
-            "grado": "2° A",
-            "entrada": "07:30 a. m.",
-            "salida": "02:00 p. m.",
-            "telefono": "55 0000 0002",
-            "emergencia": "55 0000 0012",
-            "contacto": "Familiar",
-            "seguro": "IMSS",
-            "ingreso": "10/01/2022",
-            "estado": "En servicio"
-        },
-        {
-            "numero": "EMP-003",
-            "nombre": "Laura Sánchez Pérez",
-            "puesto": "Docente de primaria",
-            "grado": "3° A",
-            "entrada": "07:40 a. m.",
-            "salida": "02:00 p. m.",
-            "telefono": "55 0000 0003",
-            "emergencia": "55 0000 0013",
-            "contacto": "Familiar",
-            "seguro": "ISSSTE",
-            "ingreso": "20/08/2021",
-            "estado": "En servicio"
-        },
-        {
-            "numero": "EMP-004",
-            "nombre": "Jorge Ramírez Soto",
-            "puesto": "Docente de primaria",
-            "grado": "4° A",
-            "entrada": "07:30 a. m.",
-            "salida": "02:00 p. m.",
-            "telefono": "55 0000 0004",
-            "emergencia": "55 0000 0014",
-            "contacto": "Familiar",
-            "seguro": "IMSS",
-            "ingreso": "12/08/2020",
-            "estado": "En servicio"
-        },
-        {
-            "numero": "EMP-005",
-            "nombre": "María Flores Díaz",
-            "puesto": "Docente de primaria",
-            "grado": "5° A",
-            "entrada": "07:35 a. m.",
-            "salida": "02:00 p. m.",
-            "telefono": "55 0000 0005",
-            "emergencia": "55 0000 0015",
-            "contacto": "Familiar",
-            "seguro": "ISSSTE",
-            "ingreso": "05/01/2024",
-            "estado": "En servicio"
-        },
-        {
-            "numero": "EMP-006",
-            "nombre": "Roberto Cruz Vega",
-            "puesto": "Docente de primaria",
-            "grado": "6° A",
-            "entrada": "07:45 a. m.",
-            "salida": "02:00 p. m.",
-            "telefono": "55 0000 0006",
-            "emergencia": "55 0000 0016",
-            "contacto": "Familiar",
-            "seguro": "IMSS",
-            "ingreso": "18/08/2022",
-            "estado": "En servicio"
-        }
-    ]
+    ALUMNOS = []
+    GRUPOS = []
+    GRUPOS_ALUMNOS = DATOS["grupos"]
+    DOCENTES = DATOS["docentes"]
 
     root.title("Plantel Educativo - Primaria Nezahualcoyotl")
     root.geometry("1150x680")
@@ -890,6 +1931,8 @@ def abrir_panel_director(root):
         def limpiar_body(titulo):
             nonlocal lienzo_activo
             lienzo_activo = None
+            ALUMNOS[:] = todos_alumnos()
+            GRUPOS[:] = sorted(GRUPOS_ALUMNOS)
 
             for widget in body.winfo_children():
                 widget.destroy()
@@ -901,6 +1944,7 @@ def abrir_panel_director(root):
                 header, text=titulo, font=("Arial", 13, "bold"),
                 bg=BLANCO, fg=TEXTO
             ).pack(side="left", padx=20, pady=12)
+
 
         def crear_area_desplazable(parent, fondo=FONDO):
             nonlocal lienzo_activo
@@ -1049,11 +2093,17 @@ def abrir_panel_director(root):
             lienzo_g.bind("<Configure>", redibujar)
             return tarjeta_g
 
+        def texto_vacio(c, w, h):
+            c.create_text(
+                w / 2, h / 2, text="Sin datos registrados todavía",
+                font=("Arial", 9), fill=DOC_GRIS
+            )
+
         def dibujar_barras(c, w, h):
-            datos = [
-                ("1° A", 96), ("2° A", 93), ("3° A", 91),
-                ("4° A", 95), ("5° A", 89), ("6° A", 94)
-            ]
+            datos = pct_por_grupo()
+            if not datos:
+                texto_vacio(c, w, h)
+                return
             izq, der, arr, aba = 34, 10, 16, 26
             ancho_u = w - izq - der
             alto_u = h - arr - aba
@@ -1085,12 +2135,11 @@ def abrir_panel_director(root):
                 )
 
         def dibujar_dona(c, w, h):
-            partes = [
-                ("Asistieron", 135, "#16A34A"),
-                ("Retardos", 7, "#CA8A04"),
-                ("Faltas", 8, "#E11D48")
-            ]
+            partes = estado_hoy_partes()
             total = sum(v for _, v, _ in partes)
+            if total == 0:
+                texto_vacio(c, w, h)
+                return
             r = max(28, min(h / 2 - 8, (w - 150) / 2))
             grosor = max(12, r * 0.32)
             cx, cy = r + 14, h / 2
@@ -1103,7 +2152,7 @@ def abrir_panel_director(root):
             for _, valor, color in partes:
                 barrido = 360 * valor / total
                 c.create_arc(
-                    *caja, start=inicio, extent=-barrido, style="arc",
+                    *caja, start=inicio, extent=-min(barrido, 359.9), style="arc",
                     outline=color, width=grosor
                 )
                 inicio -= barrido
@@ -1131,10 +2180,10 @@ def abrir_panel_director(root):
                 )
 
         def dibujar_hbarras(c, w, h):
-            datos = [
-                ("Conducta", 9), ("Académico", 6),
-                ("Incidente", 3), ("Otro", 2)
-            ]
+            datos = incidencias_por_tipo()
+            if not any(v for _, v in datos):
+                texto_vacio(c, w, h)
+                return
             izq, der = 80, 40
             maximo = max(v for _, v in datos)
             paso = h / len(datos)
@@ -1156,16 +2205,16 @@ def abrir_panel_director(root):
                 )
 
         def dibujar_linea(c, w, h):
-            datos = [
-                ("Lun", 94), ("Mar", 92), ("Mié", 95),
-                ("Jue", 90), ("Vie", 93)
-            ]
+            datos = pct_semana()
+            if not datos:
+                texto_vacio(c, w, h)
+                return
             izq, der, arr, aba = 34, 14, 16, 26
-            minimo, maximo = 80, 100
+            minimo, maximo = 0, 100
             ancho_u = w - izq - der
             alto_u = h - arr - aba
 
-            for valor in (80, 85, 90, 95, 100):
+            for valor in (0, 25, 50, 75, 100):
                 y = arr + alto_u - alto_u * (valor - minimo) / (maximo - minimo)
                 c.create_line(izq, y, w - der, y, fill="#E8EDF3")
                 c.create_text(
@@ -1180,7 +2229,8 @@ def abrir_panel_director(root):
                 puntos.append((x, y, dia, valor))
 
             coordenadas = [n for x, y, _, _ in puntos for n in (x, y)]
-            c.create_line(*coordenadas, fill="#0D9488", width=3)
+            if len(puntos) > 1:
+                c.create_line(*coordenadas, fill="#0D9488", width=3)
 
             for x, y, dia, valor in puntos:
                 c.create_oval(
@@ -1217,13 +2267,24 @@ def abrir_panel_director(root):
                 fg=DOC_GRIS
             ).pack(anchor="w", padx=18, pady=(0, 16))
 
+            p_hoy, r_hoy, f_hoy, pend_hoy, n_hoy = asistencia_hoy_conteos()
+            registrados_hoy = n_hoy - pend_hoy
+            pct_hoy = (
+                f"{round(100 * p_hoy / registrados_hoy)}%"
+                if registrados_hoy else "0%"
+            )
+
             tarjetas = [
-                ("Total docentes", "6", "#2563EB", "Personal del plantel"),
-                ("Total grupos", "6", "#16A34A", "Grupos registrados"),
-                ("Total alumnos", "150", "#9333EA", "Alumnos inscritos"),
-                ("Cartas compromiso", "12", "#CA8A04", "Cartas registradas"),
-                ("Justificantes", "8", "#E11D48", "Justificantes recibidos"),
-                ("Asistencias hoy", "142 / 150", "#0D9488", "Registro de asistencia")
+                ("Total docentes", str(len(DOCENTES)), "#2563EB", "Personal del plantel"),
+                ("Total grupos", str(len(GRUPOS_ALUMNOS)), "#16A34A", "Grupos registrados"),
+                ("Total alumnos", str(n_hoy), "#9333EA", "Alumnos inscritos"),
+                ("Cartas compromiso", str(len(DATOS["cartas"])), "#CA8A04", "Cartas registradas"),
+                ("Justificantes", str(len(DATOS["justificantes"])), "#E11D48", "Justificantes recibidos"),
+                ("Asistencias hoy", f"{p_hoy} / {n_hoy}", "#0D9488", "Registro de asistencia"),
+                ("Alumnos en alerta", str(len(alumnos_en_alerta())), "#B91C1C",
+                 f"{UMBRAL_ALERTA} o más faltas (retardo = falta)"),
+                ("Faltas hoy", str(f_hoy + r_hoy), "#EA580C", f"Incluye {r_hoy} retardo(s)"),
+                ("% de asistencia hoy", pct_hoy, "#0369A1", "Sobre alumnos con registro")
             ]
 
             cuadrilla = tk.Frame(cont, bg=FONDO)
@@ -1297,7 +2358,7 @@ def abrir_panel_director(root):
 
             tk.Label(
                 cont,
-                text="Resumen visual de asistencias e incidencias (datos de demostración).",
+                text="Resumen visual de asistencias e incidencias .",
                 font=("Arial", 9),
                 bg=FONDO,
                 fg=DOC_GRIS
@@ -1350,11 +2411,9 @@ def abrir_panel_director(root):
             ).pack(anchor="w", pady=(0, 8))
 
             actividades = [
-                "28/09 - Carta compromiso Juan Perez 2A",
-                "28/09 - Justificante Ana Lopez 1B",
-                "27/09 - Asistencia 3A actualizada",
-                "27/09 - Nuevo docente Carlos Mendez"
-            ]
+                f"{h.get('fecha', '')} - {h.get('detalle', '')}"
+                for h in reversed(DATOS["historial"][-4:])
+            ] or ["Sin actividad registrada todavía."]
 
             for actividad in actividades:
                 tk.Label(
@@ -1370,7 +2429,7 @@ def abrir_panel_director(root):
 
 
         def pantalla_docentes():
-            limpiar_body("Docentes - 6 docentes")
+            limpiar_body(f"Docentes - {len(DOCENTES)} docentes")
             lienzo, contenido = crear_area_desplazable(body, DOC_FONDO)
 
             tk.Label(
@@ -1450,6 +2509,21 @@ def abrir_panel_director(root):
                 font=("Arial", 8, "bold"), padx=8, pady=4
             ).pack(side="right")
 
+            def cargar_docentes_excel():
+                if importar_docentes_excel():
+                    pantalla_docentes()
+
+            crear_boton_docente(
+                zona_lista, "Imprimir", imprimir_docentes
+            ).pack(side="right", padx=(0, 8))
+            crear_boton_docente(
+                zona_lista, "Plantilla Excel",
+                lambda: descargar_plantilla("docentes")
+            ).pack(side="right", padx=(0, 8))
+            crear_boton_docente(
+                zona_lista, "Carga masiva (Excel)", cargar_docentes_excel
+            ).pack(side="right", padx=(0, 8))
+
             tabla = tk.Frame(contenido, bg=DOC_FONDO)
             tabla.pack(fill="x", padx=18, pady=(0, 15))
 
@@ -1481,6 +2555,14 @@ def abrir_panel_director(root):
                 ("#DDF3F8", "#167A91"),
                 ("#FCE7F3", "#B83280")
             ]
+
+            if not DOCENTES:
+                tk.Label(
+                    tabla,
+                    text="No hay docentes registrados. Usa «Carga masiva (Excel)» para agregarlos.",
+                    bg=DOC_BLANCO, fg=DOC_GRIS, font=("Arial", 10),
+                    highlightbackground=DOC_BORDE, highlightthickness=1, pady=22
+                ).pack(fill="x", pady=2)
 
             for indice, docente in enumerate(DOCENTES):
                 fila = tk.Frame(
@@ -1612,43 +2694,131 @@ def abrir_panel_director(root):
             crear_dato(contacto, "Afiliación médica", perfil["seguro"], 1, 1)
 
             tk.Label(
-                contenido, text="CONTROL ESCOLAR  •  Datos de demostración",
+                contenido, text="CONTROL ESCOLAR",
                 bg=DOC_FONDO, fg=DOC_GRIS, font=("Arial", 8)
             ).pack(anchor="w", padx=22, pady=(0, 15))
 
 
+        def pantalla_listado(
+            titulo_ventana, migas, titulo, descripcion, columnas, anchos,
+            filas, vacio, imprimir_sel=None
+        ):
+            limpiar_body(titulo_ventana)
+            lienzo, contenido = crear_area_desplazable(body, DOC_FONDO)
+
+            tk.Label(
+                contenido, text=migas, bg=DOC_FONDO, fg=DOC_AZUL,
+                font=("Arial", 8, "bold")
+            ).pack(anchor="w", padx=22, pady=(19, 5))
+
+            tk.Label(
+                contenido, text=titulo, bg=DOC_FONDO, fg=DOC_TEXTO,
+                font=("Arial", 21, "bold")
+            ).pack(anchor="w", padx=22)
+
+            tk.Label(
+                contenido, text=descripcion, bg=DOC_FONDO, fg=DOC_GRIS,
+                font=("Arial", 10), wraplength=650, justify="left"
+            ).pack(anchor="w", padx=22, pady=(4, 15))
+
+            barra_acciones = tk.Frame(contenido, bg=DOC_FONDO)
+            barra_acciones.pack(fill="x", padx=18, pady=(0, 8))
+
+            tk.Label(
+                barra_acciones, text=f"{len(filas)} registro(s)",
+                bg=DOC_FONDO, fg=DOC_GRIS, font=("Arial", 9, "bold")
+            ).pack(side="left")
+
+            marco = tk.Frame(
+                contenido, bg=DOC_BLANCO,
+                highlightbackground=DOC_BORDE, highlightthickness=1
+            )
+            marco.pack(fill="x", padx=18, pady=(0, 15))
+
+            tabla = None
+            if not filas:
+                tk.Label(
+                    marco, text=vacio, bg=DOC_BLANCO, fg=DOC_GRIS,
+                    font=("Arial", 10)
+                ).pack(padx=16, pady=30)
+            else:
+                ids = [str(i) for i in range(len(columnas))]
+                tabla = ttk.Treeview(
+                    marco, columns=ids, show="headings",
+                    height=min(max(len(filas), 3), 14), selectmode="browse"
+                )
+                for ident, texto, ancho in zip(ids, columnas, anchos):
+                    tabla.heading(ident, text=texto)
+                    tabla.column(ident, width=ancho, minwidth=50, anchor="w", stretch=True)
+                barra_v = ttk.Scrollbar(marco, orient="vertical", command=tabla.yview)
+                tabla.configure(yscrollcommand=barra_v.set)
+                tabla.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=8)
+                barra_v.pack(side="right", fill="y", pady=8)
+                for fila_datos in filas:
+                    tabla.insert("", "end", values=[str(v) for v in fila_datos])
+
+            def imprimir_todo():
+                imprimir_tabla(titulo, descripcion, columnas, filas)
+
+            def exportar():
+                exportar_excel(columnas, filas, titulo)
+
+            def imprimir_seleccion():
+                if tabla is None or not tabla.selection():
+                    messagebox.showwarning(
+                        "Sin selección", "Selecciona un registro de la tabla."
+                    )
+                    return
+                imprimir_sel(tabla.index(tabla.selection()[0]))
+
+            crear_boton_docente(
+                barra_acciones, "Imprimir todo", imprimir_todo
+            ).pack(side="right")
+            if imprimir_sel is not None:
+                crear_boton_docente(
+                    barra_acciones, "Imprimir seleccionado", imprimir_seleccion
+                ).pack(side="right", padx=(0, 8))
+            crear_boton_docente(
+                barra_acciones, "Exportar a Excel", exportar
+            ).pack(side="right", padx=(0, 8))
+
         def pantalla_asistencias():
-            limpiar_body("Registro de asistencias - 1A")
-            lienzo, cont = crear_area_desplazable(body, FONDO)
-
-            inner = tk.Frame(cont, bg=BLANCO)
-            inner.pack(fill="x", expand=True, padx=15, pady=10)
-
-            columnas = ("No", "Matricula", "Nombre", "Asis", "Ret", "Falta")
-            tabla = ttk.Treeview(
-                inner, columns=columnas, show="headings", height=14
+            filas = [
+                (r["grupo"] or "—", r["alumno"], r["asistio"], r["retardo"],
+                 r["falto"], r["total"],
+                 "ALERTA" if r["total"] >= UMBRAL_ALERTA else "Normal")
+                for r in resumen_alumnos()
+            ]
+            pantalla_listado(
+                "Registro de asistencias", "GESTIÓN ESCOLAR  /  ASISTENCIA",
+                "Registro de asistencias",
+                "Resumen acumulado por alumno. Un retardo cuenta como falta; "
+                f"con {UMBRAL_ALERTA} faltas se activa una alerta.",
+                ["Grupo", "Alumno", "Asistencias", "Retardos", "Faltas",
+                 "Faltas acumuladas", "Estado"],
+                [70, 230, 90, 80, 70, 120, 90], filas,
+                "Aún no hay alumnos. Usa la carga masiva en «Administrar grupos»."
             )
 
-            for columna in columnas:
-                tabla.heading(columna, text=columna)
-                tabla.column(
-                    columna, width=70 if columna != "Nombre" else 200,
-                    anchor="center", stretch=True
-                )
+        def pantalla_alertas():
+            alertas = alumnos_en_alerta()
+            filas = [
+                (a["grupo"] or "—", a["alumno"], a["faltas"], a["retardos"],
+                 a["total"], a["ultima"] or "—")
+                for a in alertas
+            ]
+            pantalla_listado(
+                "Alertas de inasistencias", "GESTIÓN ESCOLAR  /  ALERTAS",
+                "Alertas de inasistencias",
+                f"Alumnos con {UMBRAL_ALERTA} o más faltas acumuladas "
+                "(un retardo cuenta como falta).",
+                ["Grupo", "Alumno", "Faltas", "Retardos", "Total de faltas",
+                 "Última fecha"],
+                [70, 250, 80, 80, 120, 110], filas,
+                "No hay alumnos en alerta.",
+                imprimir_sel=lambda i: imprimir_alerta(alertas[i])
+            )
 
-            tabla.pack(fill="both", expand=True, padx=10, pady=10)
-
-            for i in range(1, 11):
-                tabla.insert(
-                    "", "end",
-                    values=(
-                        i, f"A00{i}", f"Alumno {i} Perez",
-                        "X" if i != 6 else "", 1 if i == 3 else 0,
-                        1 if i == 6 else 0
-                    )
-                )
-
-#Mariana modifico alertas
         def pantalla_cartas():
             limpiar_body("Generar carta compromiso")
             lienzo, contenido = crear_area_desplazable(body, DOC_FONDO)
@@ -1888,6 +3058,19 @@ Documento elaborado para uso escolar.
                     return
 
                 carta_generada = carta
+                DATOS["cartas"].append({
+                    "fecha": selector_fecha.get(),
+                    "alumno": alumno.get(),
+                    "grupo": grupo_var.get(),
+                    "tutor": tutor_var.get(),
+                    "motivo": motivo_texto.get("1.0", "end").strip(),
+                    "acuerdos": acuerdos_texto.get("1.0", "end").strip()
+                })
+                registrar_historial(
+                    "Carta compromiso",
+                    f"Carta compromiso · {alumno.get()}",
+                    grupo_var.get(), "Dirección"
+                )
                 vista.configure(state="normal")
                 vista.delete("1.0", "end")
                 vista.insert("1.0", carta_generada)
@@ -1940,31 +3123,12 @@ Documento elaborado para uso escolar.
                         "Primero debes generar la carta compromiso."
                     )
                     return
-
-                ruta = None
-                try:
-                    with tempfile.NamedTemporaryFile(
-                        mode="w", encoding="utf-8", suffix=".txt",
-                        prefix="carta_compromiso_", delete=False
-                    ) as archivo:
-                        archivo.write(carta_generada)
-                        ruta = archivo.name
-
-                    if os.name == "nt":
-                        os.startfile(ruta, "print")
-                    else:
-                        messagebox.showinfo(
-                            "Impresión",
-                            "El documento temporal se guardó. "
-                            "Ábrelo con un editor de texto para imprimirlo."
-                        )
-                except (OSError, AttributeError) as error:
-                    messagebox.showerror(
-                        "No se pudo imprimir",
-                        "No fue posible enviar el documento a imprimir.\n"
-                        "Puedes guardarlo manualmente.\n\n"
-                        f"{error}"
-                    )
+                imprimir_html(
+                    "Carta compromiso",
+                    "<pre style='font-family:Arial,sans-serif;font-size:14px;"
+                    "white-space:pre-wrap'>"
+                    + html_lib.escape(carta_generada) + "</pre>"
+                )
 
             acciones = tk.Frame(contenido, bg=DOC_FONDO)
             acciones.pack(fill="x", padx=18, pady=(0, 15))
@@ -1991,43 +3155,28 @@ Documento elaborado para uso escolar.
             ).pack(side="left", padx=8)
 
             tk.Label(
-                contenido, text="CONTROL ESCOLAR  •  Documento de demostración",
+                contenido, text="CONTROL ESCOLAR  •  Documento escolar",
                 bg=DOC_FONDO, fg=DOC_GRIS, font=("Arial", 8)
             ).pack(anchor="w", padx=22, pady=(0, 15))
 
 
         def pantalla_justificantes():
-            limpiar_body("Generar justificante")
-            lienzo, cont = crear_area_desplazable(body, FONDO)
-
-            box = tk.Frame(
-                cont, bg=BLANCO, highlightbackground=BORDE,
-                highlightthickness=1, padx=20, pady=20
+            registros = DATOS["justificantes"]
+            filas = [
+                (r.get("fecha", ""), r.get("alumno", ""), r.get("grupo", ""),
+                 r.get("tipo", ""), r.get("motivo", "").replace("\n", " "),
+                 r.get("registro", ""))
+                for r in registros
+            ]
+            pantalla_listado(
+                "Justificantes", "GESTIÓN ESCOLAR  /  DOCUMENTACIÓN",
+                "Justificantes",
+                "Consulta e imprime los justificantes registrados por los docentes.",
+                ["Fecha", "Alumno", "Grupo", "Tipo", "Motivo", "Registró"],
+                [90, 190, 60, 90, 300, 140], filas,
+                "Aún no hay justificantes registrados.",
+                imprimir_sel=lambda i: imprimir_justificante(registros[i])
             )
-            box.pack(fill="x", padx=15, pady=15)
-
-            tk.Label(
-                box, text="Alumno", font=("Arial", 9, "bold"),
-                bg=BLANCO, fg=TEXTO
-            ).pack(anchor="w")
-
-            ttk.Combobox(
-                box, values=["Luis Garcia Perez", "Ana Torres Lopez"]
-            ).pack(fill="x", ipady=5, pady=5)
-
-            tk.Label(
-                box, text="Descripción", font=("Arial", 9, "bold"),
-                bg=BLANCO, fg=TEXTO
-            ).pack(anchor="w", pady=(10, 2))
-
-            tk.Entry(box).pack(fill="x", ipady=15, pady=5)
-
-            tk.Button(
-                box, text="Generar justificante",
-                bg=AZUL, fg=BLANCO, font=("Arial", 10, "bold"),
-                relief="flat", pady=10, state="disabled"
-            ).pack(fill="x", pady=15)
-
 
         def pantalla_perfil():
             limpiar_body("Mi perfil")
@@ -2360,6 +3509,7 @@ Documento elaborado para uso escolar.
                     return
 
                 GRUPOS_ALUMNOS[nombre] = []
+                guardar_datos()
                 entrada_grupo.delete(0, "end")
                 actualizar_lista(nombre)
                 messagebox.showinfo("Grupo creado", f"El grupo {nombre} se creó correctamente.")
@@ -2374,11 +3524,12 @@ Documento elaborado para uso escolar.
                 confirmar = messagebox.askyesno(
                     "Eliminar grupo",
                     f"¿Deseas eliminar el grupo {nombre}?\n\n"
-                    "También se eliminará su lista de alumnos de esta demostración."
+                    "También se eliminará su lista de alumnos."
                 )
 
                 if confirmar:
                     del GRUPOS_ALUMNOS[nombre]
+                    guardar_datos()
                     entrada_alumno.delete(0, "end")
                     actualizar_lista()
 
@@ -2399,6 +3550,7 @@ Documento elaborado para uso escolar.
                     return
 
                 GRUPOS_ALUMNOS[grupo].append(nombre)
+                guardar_datos()
                 entrada_alumno.delete(0, "end")
                 actualizar_tabla()
 
@@ -2430,6 +3582,7 @@ Documento elaborado para uso escolar.
                     return
 
                 GRUPOS_ALUMNOS[grupo][indice] = nuevo_nombre
+                guardar_datos()
                 entrada_alumno.delete(0, "end")
                 actualizar_tabla()
 
@@ -2454,6 +3607,7 @@ Documento elaborado para uso escolar.
                     f"¿Deseas eliminar a {nombre} del grupo {grupo}?"
                 ):
                     GRUPOS_ALUMNOS[grupo].pop(indice)
+                    guardar_datos()
                     entrada_alumno.delete(0, "end")
                     actualizar_tabla()
 
@@ -2487,6 +3641,34 @@ Documento elaborado para uso escolar.
                 cursor="hand2", bd=0, pady=9
             ).pack(fill="x")
 
+            def cargar_excel_alumnos():
+                if importar_alumnos_excel():
+                    actualizar_lista(grupo_seleccionado())
+
+            def imprimir_lista_grupo():
+                grupo = grupo_seleccionado()
+                if grupo is None:
+                    messagebox.showwarning("Sin selección", "Selecciona un grupo.")
+                    return
+                imprimir_tabla(
+                    f"Lista de alumnos · Grupo {grupo}", "",
+                    ["N.º", "Nombre del alumno"],
+                    [(n, a) for n, a in enumerate(GRUPOS_ALUMNOS[grupo], start=1)]
+                )
+
+            for texto_b, accion_b in (
+                ("Carga masiva (Excel)", cargar_excel_alumnos),
+                ("Plantilla de Excel", lambda: descargar_plantilla("alumnos")),
+                ("Imprimir lista del grupo", imprimir_lista_grupo)
+            ):
+                tk.Button(
+                    botones_grupos, text=texto_b, command=accion_b,
+                    bg=DOC_AZUL_CLARO, fg=DOC_AZUL_OSCURO,
+                    activebackground="#D4E3FF", activeforeground=DOC_AZUL_OSCURO,
+                    font=("Arial", 9, "bold"), relief="flat",
+                    cursor="hand2", bd=0, pady=9
+                ).pack(fill="x", pady=(7, 0))
+
             botones_alumnos = tk.Frame(panel_alumnos, bg=DOC_BLANCO)
             botones_alumnos.pack(fill="x", padx=15, pady=(0, 15))
 
@@ -2517,27 +3699,20 @@ Documento elaborado para uso escolar.
 
             actualizar_lista()
 
-        # HISTORIAL
 
         def pantalla_historial():
             movimientos = [
-                ("27/10/2026", "Asistencia", "Asistencia de 3° A actualizada", "3° A", "Laura Sánchez Pérez"),
-                ("27/10/2026", "Justificante", "Justificante de Ana López Martínez", "1° A", "Ana Torres López"),
-                ("26/10/2026", "Incidencia", "Incidencia de conducta · Mateo Flores Díaz", "2° A", "Carlos Méndez Ruiz"),
-                ("26/10/2026", "Carta compromiso", "Carta compromiso · Diego Ramírez Flores", "4° A", "Dirección"),
-                ("24/10/2026", "Asistencia", "Asistencia de 5° A registrada", "5° A", "María Flores Díaz"),
-                ("23/10/2026", "Incidencia", "Incidencia académica · Daniela Ruiz López", "5° A", "María Flores Díaz"),
-                ("23/10/2026", "Justificante", "Justificante de Camila Torres Reyes", "3° A", "Laura Sánchez Pérez"),
-                ("22/10/2026", "Carta compromiso", "Carta compromiso · Sebastián Morales Vega", "5° A", "Dirección"),
-                ("21/10/2026", "Asistencia", "Asistencia de 6° A registrada", "6° A", "Roberto Cruz Vega"),
-                ("20/10/2026", "Incidencia", "Incidente · Emiliano Cruz Morales", "3° A", "Laura Sánchez Pérez")
+                (h.get("fecha", ""), h.get("tipo", ""), h.get("detalle", ""),
+                 h.get("grupo", "—"), h.get("quien", "—"))
+                for h in reversed(DATOS["historial"])
             ]
 
             colores_tipo = {
                 "Asistencia": (DOC_AZUL_CLARO, DOC_AZUL_OSCURO),
                 "Justificante": (DOC_VERDE_CLARO, DOC_VERDE),
                 "Incidencia": ("#FDE8E7", "#B42318"),
-                "Carta compromiso": ("#FFF3DF", "#C9822B")
+                "Carta compromiso": ("#FFF3DF", "#C9822B"),
+                "Alerta": ("#FFE4E6", "#9F1239")
             }
 
             limpiar_body(f"Historial - {len(movimientos)} movimientos")
@@ -2630,50 +3805,65 @@ Documento elaborado para uso escolar.
                 )
 
             etiqueta_filtro("Buscar", 0)
-            tk.Entry(
+            entrada_busqueda = tk.Entry(
                 interior, font=("Arial", 10), bg="#F8FAFC", fg=DOC_TEXTO,
                 relief="flat", highlightthickness=1,
                 highlightbackground=DOC_BORDE, highlightcolor=DOC_AZUL,
                 insertbackground=DOC_TEXTO
-            ).grid(row=1, column=0, sticky="ew", padx=pad_filtro(0), ipady=8)
+            )
+            entrada_busqueda.grid(row=1, column=0, sticky="ew", padx=pad_filtro(0), ipady=8)
+            entrada_busqueda.bind("<Return>", lambda e: pintar_filas())
 
             etiqueta_filtro("Tipo de movimiento", 1)
             combo_tipo = ttk.Combobox(
                 interior, state="readonly", font=("Arial", 10),
                 values=["Todos", "Asistencia", "Justificante",
-                        "Incidencia", "Carta compromiso"]
+                        "Incidencia", "Carta compromiso", "Alerta"]
             )
             combo_tipo.grid(row=1, column=1, sticky="ew", padx=pad_filtro(1), ipady=5)
             combo_tipo.set("Todos")
 
             etiqueta_filtro("Desde", 2)
-            SelectorFecha(
-                interior, inicial=date.today().replace(day=1),
+            desde_sel = SelectorFecha(
+                interior, inicial=date.today() - timedelta(days=30),
                 fuente=("Arial", 10), fondo="#F8FAFC", borde=DOC_BORDE,
                 acento=DOC_AZUL, acento_claro=DOC_AZUL_CLARO,
                 texto=DOC_TEXTO, suave=DOC_GRIS, ipady=8
-            ).grid(row=1, column=2, sticky="ew", padx=pad_filtro(2))
+            )
+            desde_sel.grid(row=1, column=2, sticky="ew", padx=pad_filtro(2))
 
             etiqueta_filtro("Hasta", 3)
-            SelectorFecha(
+            hasta_sel = SelectorFecha(
                 interior, fuente=("Arial", 10), fondo="#F8FAFC",
                 borde=DOC_BORDE, acento=DOC_AZUL,
                 acento_claro=DOC_AZUL_CLARO, texto=DOC_TEXTO,
                 suave=DOC_GRIS, ipady=8
-            ).grid(row=1, column=3, sticky="ew", padx=pad_filtro(3))
+            )
+            hasta_sel.grid(row=1, column=3, sticky="ew", padx=pad_filtro(3))
 
             botones_filtro = tk.Frame(interior, bg=DOC_BLANCO)
             botones_filtro.grid(row=2, column=0, columnspan=4, sticky="e", pady=(14, 0))
 
             tk.Button(
-                botones_filtro, text="Exportar", bg=DOC_AZUL_CLARO,
+                botones_filtro, text="Imprimir",
+                command=lambda: imprimir_historial(),
+                bg=DOC_VERDE_CLARO, fg=DOC_VERDE,
+                activebackground=DOC_VERDE_CLARO, activeforeground=DOC_VERDE,
+                font=("Arial", 9, "bold"), relief="flat", bd=0,
+                cursor="hand2", padx=16, pady=8
+            ).pack(side="left", padx=(0, 8))
+
+            tk.Button(
+                botones_filtro, text="Exportar",
+                command=lambda: exportar_historial(), bg=DOC_AZUL_CLARO,
                 fg=DOC_AZUL_OSCURO, activebackground=DOC_AZUL_CLARO,
                 activeforeground=DOC_AZUL_OSCURO, font=("Arial", 9, "bold"),
                 relief="flat", bd=0, cursor="hand2", padx=16, pady=8
             ).pack(side="left", padx=(0, 8))
 
             tk.Button(
-                botones_filtro, text="Filtrar", bg=DOC_AZUL, fg=DOC_BLANCO,
+                botones_filtro, text="Filtrar", command=lambda: pintar_filas(),
+                bg=DOC_AZUL, fg=DOC_BLANCO,
                 activebackground=DOC_AZUL_OSCURO, activeforeground=DOC_BLANCO,
                 font=("Arial", 9, "bold"), relief="flat", bd=0,
                 cursor="hand2", padx=16, pady=8
@@ -2718,47 +3908,125 @@ Documento elaborado para uso escolar.
                     padx=10, pady=10
                 ).grid(row=0, column=columna, sticky="nsew")
 
-            for fecha, tipo, detalle, grupo, quien in movimientos:
-                fila = tk.Frame(
-                    tabla, bg=DOC_BLANCO,
-                    highlightbackground=DOC_BORDE, highlightthickness=1
+            filas_cont = tk.Frame(tabla, bg=DOC_FONDO)
+            filas_cont.pack(fill="x")
+
+            pie_historial = tk.Label(
+                contenido, text="", bg=DOC_FONDO, fg=DOC_GRIS,
+                font=("Arial", 8)
+            )
+            pie_historial.pack(anchor="w", padx=22, pady=(0, 15))
+
+            COLUMNAS_HIST = ["Fecha", "Tipo", "Detalle", "Grupo", "Registró"]
+
+            def filtradas():
+                texto = normalizar_texto(entrada_busqueda.get().strip())
+                tipo_sel = combo_tipo.get()
+                desde = parse_fecha(desde_sel.get())
+                hasta = parse_fecha(hasta_sel.get())
+                resultado = []
+                for m in movimientos:
+                    f = parse_fecha(m[0])
+                    if tipo_sel != "Todos" and m[1] != tipo_sel:
+                        continue
+                    if f and desde and f < desde:
+                        continue
+                    if f and hasta and f > hasta:
+                        continue
+                    if texto and texto not in normalizar_texto(" ".join(m)):
+                        continue
+                    resultado.append(m)
+                return resultado
+
+            def pintar_filas():
+                for w in filas_cont.winfo_children():
+                    w.destroy()
+                visibles = filtradas()
+                if not visibles:
+                    tk.Label(
+                        filas_cont, text="Sin movimientos para mostrar.",
+                        bg=DOC_BLANCO, fg=DOC_GRIS, font=("Arial", 10),
+                        highlightbackground=DOC_BORDE, highlightthickness=1,
+                        pady=18
+                    ).pack(fill="x", pady=2)
+                for fecha, tipo, detalle, grupo, quien in visibles:
+                    fila = tk.Frame(
+                        filas_cont, bg=DOC_BLANCO,
+                        highlightbackground=DOC_BORDE, highlightthickness=1
+                    )
+                    fila.pack(fill="x", pady=2)
+                    configurar_columnas(fila)
+
+                    tk.Label(
+                        fila, text=fecha, bg=DOC_BLANCO, fg=DOC_GRIS,
+                        font=("Arial", 9), anchor="w", padx=10
+                    ).grid(row=0, column=0, sticky="nsew", pady=12)
+
+                    fondo_chip, texto_chip = colores_tipo.get(tipo, (DOC_AZUL_CLARO, DOC_AZUL_OSCURO))
+                    tk.Label(
+                        fila, text=tipo, bg=fondo_chip, fg=texto_chip,
+                        font=("Arial", 8, "bold"), padx=8, pady=4
+                    ).grid(row=0, column=1, padx=6, pady=10)
+
+                    tk.Label(
+                        fila, text=detalle, bg=DOC_BLANCO, fg=DOC_TEXTO,
+                        font=("Arial", 9, "bold"), anchor="w", padx=10,
+                        wraplength=330, justify="left"
+                    ).grid(row=0, column=2, sticky="nsew", pady=10)
+
+                    tk.Label(
+                        fila, text=grupo, bg=DOC_AZUL_CLARO, fg=DOC_AZUL_OSCURO,
+                        font=("Arial", 8, "bold"), padx=5, pady=4
+                    ).grid(row=0, column=3, padx=3, pady=10)
+
+                    tk.Label(
+                        fila, text=quien, bg=DOC_BLANCO, fg=DOC_GRIS,
+                        font=("Arial", 8), anchor="w", padx=10,
+                        wraplength=150, justify="left"
+                    ).grid(row=0, column=4, sticky="nsew", pady=10)
+
+                pie_historial.config(
+                    text=f"Mostrando {len(visibles)} de {len(movimientos)} movimientos"
                 )
-                fila.pack(fill="x", pady=2)
-                configurar_columnas(fila)
 
-                tk.Label(
-                    fila, text=fecha, bg=DOC_BLANCO, fg=DOC_GRIS,
-                    font=("Arial", 9), anchor="w", padx=10
-                ).grid(row=0, column=0, sticky="nsew", pady=12)
+            def exportar_historial():
+                exportar_excel(COLUMNAS_HIST, filtradas(), "Historial")
 
-                fondo_chip, texto_chip = colores_tipo[tipo]
-                tk.Label(
-                    fila, text=tipo, bg=fondo_chip, fg=texto_chip,
-                    font=("Arial", 8, "bold"), padx=8, pady=4
-                ).grid(row=0, column=1, padx=6, pady=10)
+            def imprimir_historial():
+                imprimir_tabla(
+                    "Historial de movimientos",
+                    f"Del {desde_sel.get()} al {hasta_sel.get()}",
+                    COLUMNAS_HIST, filtradas()
+                )
 
-                tk.Label(
-                    fila, text=detalle, bg=DOC_BLANCO, fg=DOC_TEXTO,
-                    font=("Arial", 9, "bold"), anchor="w", padx=10,
-                    wraplength=330, justify="left"
-                ).grid(row=0, column=2, sticky="nsew", pady=10)
+            pintar_filas()
 
-                tk.Label(
-                    fila, text=grupo, bg=DOC_AZUL_CLARO, fg=DOC_AZUL_OSCURO,
-                    font=("Arial", 8, "bold"), padx=5, pady=4
-                ).grid(row=0, column=3, padx=3, pady=10)
 
-                tk.Label(
-                    fila, text=quien, bg=DOC_BLANCO, fg=DOC_GRIS,
-                    font=("Arial", 8), anchor="w", padx=10,
-                    wraplength=150, justify="left"
-                ).grid(row=0, column=4, sticky="nsew", pady=10)
+        def pantalla_diccionario():
+            limpiar_body("Diccionario Inglés–Español")
+            lienzo, contenido = crear_area_desplazable(body, DOC_FONDO)
+
+            tk.Label(
+                contenido, text="GESTIÓN ESCOLAR  /  CONSULTA",
+                bg=DOC_FONDO, fg=DOC_AZUL, font=("Arial", 8, "bold")
+            ).pack(anchor="w", padx=22, pady=(19, 5))
+
+            tk.Label(
+                contenido, text="Diccionario de datos",
+                bg=DOC_FONDO, fg=DOC_TEXTO, font=("Arial", 21, "bold")
+            ).pack(anchor="w", padx=22)
 
             tk.Label(
                 contenido,
-                text=f"Mostrando {len(movimientos)} de {len(movimientos)} movimientos  •  Datos de demostración",
-                bg=DOC_FONDO, fg=DOC_GRIS, font=("Arial", 8)
-            ).pack(anchor="w", padx=22, pady=(0, 15))
+                text="Consulta el diccionario en español y su versión en inglés.",
+                bg=DOC_FONDO, fg=DOC_GRIS, font=("Arial", 10)
+            ).pack(anchor="w", padx=22, pady=(4, 15))
+
+            VisorPDF(
+                contenido, fondo=DOC_FONDO, tarjeta=DOC_BLANCO, borde=DOC_BORDE,
+                acento=DOC_AZUL, acento_oscuro=DOC_AZUL_OSCURO,
+                acento_claro=DOC_AZUL_CLARO, texto=DOC_TEXTO, suave=DOC_GRIS
+            ).pack(fill="x", padx=18, pady=(0, 15))
 
 
         tk.Label(
@@ -2776,9 +4044,13 @@ Documento elaborado para uso escolar.
         opciones = [
             ("Inicio", pantalla_inicio),
             ("Docentes", pantalla_docentes),
+            ("Asistencias", pantalla_asistencias),
+            ("Justificantes", pantalla_justificantes),
+            ("Alertas", pantalla_alertas),
             ("Cartas compromiso", pantalla_cartas),
             ("Administrar grupos", pantalla_grupos),
             ("Historial", pantalla_historial),
+            ("Diccionario Inglés–Español", pantalla_diccionario),
             ("Mi perfil", pantalla_perfil)
         ]
 
@@ -2853,26 +4125,20 @@ def abrir_panel_maestro(panel, usuario):
     BORDE = "#E2E8F0"
     CAMPO = "#F8FAFC"
 
-    NOMBRE_MAESTRO = usuario if usuario else "Juan Pérez García"
-    GRUPO_MAESTRO = "3° A"
+    NOMBRE_MAESTRO = usuario if usuario else "Docente"
+    REGISTRO_DOCENTE = buscar_docente(usuario) or {}
+    GRUPO_MAESTRO = REGISTRO_DOCENTE.get("grado") or "Sin asignar"
+    if GRUPO_MAESTRO == "—":
+        GRUPO_MAESTRO = "Sin asignar"
     PLANTEL = "Primaria Nezahualcóyotl"
 
-    ALUMNOS = [
-        "Ana López Martínez",
-        "Carlos Hernández Ruiz",
-        "Sofía García Torres",
-        "Diego Ramírez Flores",
-        "Valeria Sánchez Cruz",
-        "Mateo Flores Díaz",
-        "Camila Torres Reyes",
-        "Emiliano Cruz Morales",
-        "Daniela Ruiz López",
-        "Sebastián Morales Vega"
-    ]
+    ALUMNOS = []
 
-    asistencias = {}
-    justificantes = []
-    incidencias = []
+    def lista_alumnos():
+        if GRUPO_MAESTRO in DATOS["grupos"]:
+            return list(DATOS["grupos"][GRUPO_MAESTRO])
+        return todos_alumnos()
+
     area_contenido = None
     lienzo_contenido = None
     botones_menu = {}
@@ -3042,14 +4308,14 @@ def abrir_panel_maestro(panel, usuario):
 
     def abrir_pantalla(nombre, funcion):
         actualizar_menu(nombre)
+        ALUMNOS[:] = lista_alumnos()
         if lienzo_contenido is not None:
             lienzo_contenido.yview_moveto(0)
         funcion()
 
     def contar_asistencias(fecha):
-        """Devuelve (asistieron, retardos, faltas, pendientes) de la fecha."""
         estados = [
-            asistencias.get((fecha, alumno), ("", ""))[1]
+            DATOS["asistencias"].get(fecha, {}).get(alumno, "")
             for alumno in ALUMNOS
         ]
         presentes = estados.count("Asistió")
@@ -3148,11 +4414,15 @@ def abrir_panel_maestro(panel, usuario):
         )
         crear_indicador(
             indicadores, "Llegaron tarde", retardos, AMARILLO,
-            "Registro de hoy"
+            "Cuentan como falta"
         )
         crear_indicador(
             indicadores, "Pendientes", pendientes, NARANJA,
             "Sin registrar hoy"
+        )
+        crear_indicador(
+            indicadores, "En alerta", len(alumnos_en_alerta(ALUMNOS)), ROJO,
+            f"{UMBRAL_ALERTA}+ faltas acumuladas"
         )
 
         accesos = tarjeta(area_contenido, 22)
@@ -3190,6 +4460,11 @@ def abrir_panel_maestro(panel, usuario):
         boton_padre(
             fila, "Crear incidencia",
             lambda: abrir_pantalla("Incidencias", pantalla_incidencias)
+        ).pack(side="left", padx=(0, 10))
+
+        boton_padre(
+            fila, "Ver alertas",
+            lambda: abrir_pantalla("Alertas", pantalla_alertas)
         ).pack(side="left")
 
     def pantalla_asistencias():
@@ -3223,7 +4498,9 @@ def abrir_panel_maestro(panel, usuario):
         ).pack(anchor="w")
 
         tk.Label(
-            panel_asist, text="Selecciona una opción para cada alumno.",
+            panel_asist,
+            text="Selecciona una opción para cada alumno. Un retardo cuenta como "
+                 f"falta; con {UMBRAL_ALERTA} faltas se activa una alerta.",
             bg=BLANCO, fg=SECUNDARIO, font=("Segoe UI", 10)
         ).pack(anchor="w", pady=(4, 15))
 
@@ -3244,6 +4521,7 @@ def abrir_panel_maestro(panel, usuario):
             ).grid(row=0, column=columna, sticky="nsew", padx=2, pady=2)
 
         botones_alumnos = {}
+        etiquetas_nombre = {}
 
         COLORES = {
             "Asistió": (VERDE, BLANCO, VERDE_SUAVE, VERDE),
@@ -3252,7 +4530,19 @@ def abrir_panel_maestro(panel, usuario):
         }
 
         def actualizar_botones(alumno):
-            estado = asistencias.get((fecha_hoy, alumno), ("", ""))[1]
+            estado = DATOS["asistencias"].get(fecha_hoy, {}).get(alumno, "")
+            total_f = faltas_acumuladas(alumno)
+            etiqueta_n = etiquetas_nombre.get(alumno)
+            if etiqueta_n is not None:
+                sufijo = ""
+                if total_f:
+                    sufijo = f"   ({total_f} falta{'s' if total_f != 1 else ''})"
+                if total_f >= UMBRAL_ALERTA:
+                    sufijo += "  ⚠ ALERTA"
+                etiqueta_n.config(
+                    text=alumno + sufijo,
+                    fg=ROJO if total_f >= UMBRAL_ALERTA else TEXTO
+                )
             for nombre_estado, boton in zip(
                 ("Asistió", "Retardo", "Faltó"), botones_alumnos[alumno]
             ):
@@ -3263,9 +4553,15 @@ def abrir_panel_maestro(panel, usuario):
                     boton.config(bg=suave_bg, fg=suave_fg)
 
         def cambiar_estado(alumno, estado):
-            asistencias[(fecha_hoy, alumno)] = (fecha_hoy, estado)
+            DATOS["asistencias"].setdefault(fecha_hoy, {})[alumno] = estado
+            guardar_datos()
+            registrar_historial_unico(
+                "Asistencia", f"Asistencia de {GRUPO_MAESTRO} registrada",
+                GRUPO_MAESTRO, NOMBRE_MAESTRO
+            )
             actualizar_botones(alumno)
             actualizar_resumen()
+            revisar_alerta(alumno, NOMBRE_MAESTRO)
 
         def crear_boton_estado(texto, estado, alumno, fila, columna):
             activo_bg, activo_fg, suave_bg, suave_fg = COLORES[estado]
@@ -3281,13 +4577,24 @@ def abrir_panel_maestro(panel, usuario):
             boton.grid(row=fila, column=columna, sticky="ew", padx=5, pady=4)
             return boton
 
+        if not ALUMNOS:
+            tk.Label(
+                tabla_frame,
+                text="No hay alumnos registrados. La dirección debe cargarlos "
+                     "(carga masiva en Excel).",
+                bg=BLANCO, fg=SECUNDARIO, font=("Segoe UI", 10), pady=20
+            ).grid(row=1, column=0, columnspan=4, sticky="ew")
+
         for fila, alumno in enumerate(ALUMNOS, start=1):
             fondo_fila = BLANCO if fila % 2 else "#F8FAFC"
 
-            tk.Label(
+            etiquetas_nombre[alumno] = tk.Label(
                 tabla_frame, text=alumno, bg=fondo_fila, fg=TEXTO,
                 font=("Segoe UI", 10), anchor="w", padx=10, pady=10
-            ).grid(row=fila, column=0, sticky="nsew", padx=2, pady=2)
+            )
+            etiquetas_nombre[alumno].grid(
+                row=fila, column=0, sticky="nsew", padx=2, pady=2
+            )
 
             botones_alumnos[alumno] = (
                 crear_boton_estado("✓  Asistió", "Asistió", alumno, fila, 1),
@@ -3327,7 +4634,20 @@ def abrir_panel_maestro(panel, usuario):
                 f"Sin registrar: {pendientes}"
             )
 
+        def imprimir_asistencia():
+            estados = DATOS["asistencias"].get(fecha_hoy, {})
+            imprimir_tabla(
+                f"Lista de asistencia · Grupo {GRUPO_MAESTRO}",
+                f"Fecha: {fecha_hoy}  ·  Docente: {NOMBRE_MAESTRO}",
+                ["Alumno", "Asistencia de hoy", "Faltas acumuladas"],
+                [(a, estados.get(a, "Sin registrar"), faltas_acumuladas(a))
+                 for a in ALUMNOS]
+            )
+
         boton_padre(resumen, "Ver resumen", mostrar_resumen).pack(side="right")
+        boton_padre(
+            resumen, "Imprimir asistencia", imprimir_asistencia
+        ).pack(side="right", padx=(0, 10))
 
         actualizar_resumen()
 
@@ -3337,7 +4657,7 @@ def abrir_panel_maestro(panel, usuario):
             "Registra y organiza las justificaciones de inasistencia."
         )
 
-        GAP = 12  
+        GAP = 12
         FONDO_VACIO = "#F1F5FF"
         BORDE_VACIO = "#B9CBF5"
 
@@ -3480,18 +4800,19 @@ def abrir_panel_maestro(panel, usuario):
                 )
                 return
 
-            justificantes.append({
-                "alumno": alumno,
-                "grupo": GRUPO_MAESTRO,
-                "fecha": fecha,
-                "tipo": tipo_var.get(),
-                "motivo": descripcion
-            })
+            reg = guardar_justificante(
+                alumno, fecha, tipo_var.get(), descripcion, NOMBRE_MAESTRO
+            )
 
             messagebox.showinfo(
                 "Registro exitoso",
                 f"El justificante de {alumno} se registró correctamente."
             )
+            if messagebox.askyesno(
+                "Imprimir justificante",
+                "¿Deseas imprimir el justificante ahora?"
+            ):
+                imprimir_justificante(reg)
             limpiar()
 
         acciones = tk.Frame(panel_just, bg=BLANCO)
@@ -3509,13 +4830,18 @@ def abrir_panel_maestro(panel, usuario):
             acciones, "Guardar justificante", registrar
         ).pack(side="left")
 
+        boton_padre(
+            acciones, "Imprimir registrados",
+            lambda: imprimir_registros("justificantes", GRUPO_MAESTRO)
+        ).pack(side="left", padx=(10, 0))
+
     def pantalla_incidencias():
         encabezado(
             "Registro de incidencias",
             "Documenta situaciones académicas, de conducta u otros incidentes."
         )
 
-        GAP = 12  
+        GAP = 12
 
         panel_inc = tarjeta(area_contenido, 24)
         panel_inc.pack(fill="x")
@@ -3668,19 +4994,20 @@ def abrir_panel_maestro(panel, usuario):
                 )
                 return
 
-            incidencias.append({
-                "alumno": alumno,
-                "grupo": GRUPO_MAESTRO,
-                "tipo": tipo,
-                "prioridad": prioridad_var.get(),
-                "motivo": descripcion,
-                "fecha": fecha
-            })
+            reg = guardar_incidencia(
+                alumno, fecha, tipo, prioridad_var.get(), descripcion,
+                NOMBRE_MAESTRO
+            )
 
             messagebox.showinfo(
                 "Registro exitoso",
                 f"La incidencia de {alumno} se registró correctamente."
             )
+            if messagebox.askyesno(
+                "Imprimir incidencia",
+                "¿Deseas imprimir el reporte de la incidencia ahora?"
+            ):
+                imprimir_incidencia(reg)
             limpiar()
 
         acciones = tk.Frame(panel_inc, bg=BLANCO)
@@ -3697,6 +5024,77 @@ def abrir_panel_maestro(panel, usuario):
         boton_padre(
             acciones, "Guardar incidencia", registrar
         ).pack(side="left")
+
+        boton_padre(
+            acciones, "Imprimir registradas",
+            lambda: imprimir_registros("incidencias", GRUPO_MAESTRO)
+        ).pack(side="left", padx=(10, 0))
+
+    def pantalla_alertas():
+        encabezado(
+            "Alertas de inasistencias",
+            f"Alumnos con {UMBRAL_ALERTA} o más faltas acumuladas. "
+            "Un retardo cuenta como falta."
+        )
+        alertas = alumnos_en_alerta(ALUMNOS)
+
+        panel_alertas = tarjeta(area_contenido, 20)
+        panel_alertas.pack(fill="x")
+
+        superior_al = tk.Frame(panel_alertas, bg=BLANCO)
+        superior_al.pack(fill="x", pady=(0, 14))
+
+        tk.Label(
+            superior_al, text=f"Alumnos en alerta: {len(alertas)}",
+            bg=BLANCO, fg=MARINO, font=("Segoe UI", 14, "bold")
+        ).pack(side="left")
+
+        if not alertas:
+            tk.Label(
+                panel_alertas,
+                text="Ningún alumno ha llegado al límite de faltas.",
+                bg=BLANCO, fg=SECUNDARIO, font=("Segoe UI", 10)
+            ).pack(anchor="w", pady=10)
+            return
+
+        tabla_al = ttk.Treeview(
+            panel_alertas, style="Tabla.Treeview",
+            columns=("alumno", "faltas", "retardos", "total", "ultima"),
+            show="headings", height=min(max(len(alertas), 3), 12),
+            selectmode="browse"
+        )
+        for col, texto, ancho in (
+            ("alumno", "Alumno", 260), ("faltas", "Faltas", 80),
+            ("retardos", "Retardos", 90), ("total", "Total", 80),
+            ("ultima", "Última fecha", 120)
+        ):
+            tabla_al.heading(col, text=texto)
+            tabla_al.column(
+                col, width=ancho, anchor="w" if col == "alumno" else "center"
+            )
+        tabla_al.pack(fill="x")
+        for a in alertas:
+            tabla_al.insert("", "end", values=(
+                a["alumno"], a["faltas"], a["retardos"], a["total"],
+                a["ultima"] or "—"
+            ))
+
+        def imprimir_seleccionada():
+            seleccion = tabla_al.selection()
+            if not seleccion:
+                messagebox.showwarning(
+                    "Sin selección", "Selecciona un alumno de la tabla."
+                )
+                return
+            imprimir_alerta(alertas[tabla_al.index(seleccion[0])])
+
+        boton_padre(
+            superior_al, "Imprimir lista",
+            lambda: imprimir_alertas(alertas, GRUPO_MAESTRO)
+        ).pack(side="right")
+        boton_padre(
+            superior_al, "Imprimir seleccionada", imprimir_seleccionada
+        ).pack(side="right", padx=(0, 10))
 
     def pantalla_perfil():
         encabezado(
@@ -3797,8 +5195,8 @@ def abrir_panel_maestro(panel, usuario):
             ("Cargo", "Docente"),
             ("Grupo asignado", GRUPO_MAESTRO),
             ("Plantel", PLANTEL),
-            ("Turno", "Matutino"),
-            ("Horario", "7:30 a. m. - 12:30 p. m.")
+            ("Hora de entrada", REGISTRO_DOCENTE.get("entrada") or "—"),
+            ("Hora de salida", REGISTRO_DOCENTE.get("salida") or "—")
         ]
 
         for titulo, valor in datos_laborales:
@@ -3829,9 +5227,9 @@ def abrir_panel_maestro(panel, usuario):
         ).pack(anchor="w", pady=(0, 12))
 
         datos_emergencia = [
-            ("Nombre", "María García"),
-            ("Relación", "Familiar"),
-            ("Teléfono", "55 8765 4321")
+            ("Nombre", REGISTRO_DOCENTE.get("contacto_nombre") or "—"),
+            ("Relación", REGISTRO_DOCENTE.get("contacto") or "—"),
+            ("Teléfono", REGISTRO_DOCENTE.get("emergencia") or "—")
         ]
 
         for titulo, valor in datos_emergencia:
@@ -3860,6 +5258,17 @@ def abrir_panel_maestro(panel, usuario):
             wraplength=300,
             justify="left"
         ).pack(anchor="w", pady=(18, 0))
+
+    def pantalla_diccionario():
+        encabezado(
+            "Diccionario Inglés–Español",
+            "Consulta el diccionario en español y su versión en inglés."
+        )
+        VisorPDF(
+            area_contenido, fondo=FONDO, tarjeta=BLANCO, borde=BORDE,
+            acento=AZUL, acento_oscuro=AZUL_HOVER, acento_claro=AZUL_SUAVE,
+            texto=TEXTO, suave=SECUNDARIO
+        ).pack(fill="x")
 
     def cerrar_sesion_maestro():
         if messagebox.askyesno("Cerrar sesión", "¿Deseas volver al inicio de sesión?"):
@@ -3929,6 +5338,8 @@ def abrir_panel_maestro(panel, usuario):
             ("Asistencias", pantalla_asistencias),
             ("Justificantes", pantalla_justificantes),
             ("Incidencias", pantalla_incidencias),
+            ("Alertas", pantalla_alertas),
+            ("Diccionario Inglés–Español", pantalla_diccionario),
             ("Mi perfil", pantalla_perfil)
         ]
 
@@ -4123,6 +5534,7 @@ def abrir_panel_maestro(panel, usuario):
         root.bind_all("<Button-5>", desplazar_docente_linux_abajo)
 
         actualizar_menu("Inicio")
+        ALUMNOS[:] = lista_alumnos()
         pantalla_inicio()
 
     crear_app()
@@ -4138,7 +5550,6 @@ def abrir_panel(usuario, rol):
 
 
 def mostrar_codigo():
-    """Prepara el nombre fijo de la cuenta del director."""
     if var_codigo.get():
         entrada_usuario.delete(0, tk.END)
         entrada_usuario.insert(0, "Director")
