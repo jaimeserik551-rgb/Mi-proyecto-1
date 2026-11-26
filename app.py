@@ -5772,7 +5772,7 @@ tk.Label(
 
 tk.Button(
     formulario,
-    text="Crear cuenta",
+    text="Crear cuenta:)",
     command=registrar_usuario,
     font=("Arial", 10, "bold"),
     bg=BOTON_SECUNDARIO,
