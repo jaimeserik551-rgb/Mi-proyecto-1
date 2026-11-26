@@ -5769,6 +5769,7 @@ tk.Label(
     bg=TARJETA,
     fg=SUAVE
 ).pack(anchor="w", pady=(0, 9))
+#Rodrigo KPIs
 
 tk.Button(
     formulario,
