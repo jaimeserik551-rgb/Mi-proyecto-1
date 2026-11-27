@@ -8,7 +8,7 @@ import json
 import os
 import hashlib
 import secrets
-
+#mariana agrego alertas
 ARCHIVO = "usuarios_escolares.json"
 
 AZUL_OSCURO = "#0f172a"
@@ -1607,16 +1607,15 @@ def abrir_panel_director(root):
             tk.Label(
                 contenido, text="CONTROL ESCOLAR  •  Datos de demostración",
                 bg=DOC_FONDO, fg=DOC_GRIS, font=("Arial", 8)
-            ).pack(anchor="w", padx=22, pady=(0, 15))
+            ).pack(anchor="w", padx=22, pady=(0, 15)) 
 
-
-        def pantalla_asistencias():
+        def pantalla_asistencias()
             limpiar_body("Registro de asistencias - 1A")
             lienzo, cont = crear_area_desplazable(body, FONDO)
 
             inner = tk.Frame(cont, bg=BLANCO)
             inner.pack(fill="x", expand=True, padx=15, pady=10)
-
+#mariana agrego alertas 
             columnas = ("No", "Matricula", "Nombre", "Asis", "Ret", "Falta")
             tabla = ttk.Treeview(
                 inner, columns=columnas, show="headings", height=14
@@ -1625,13 +1624,12 @@ def abrir_panel_director(root):
             for columna in columnas:
                 tabla.heading(columna, text=columna)
                 tabla.column(
-                    columna, width=70 if columna != "Nombre" else 200,
+                    columnas, width=70 if columna!= "Nombre" else 200,
                     anchor="center", stretch=True
-                )
+                    )
+                tabla.pack(fill="both", expand=True, padx=10, pady=10)
 
-            tabla.pack(fill="both", expand=True, padx=10, pady=10)
-
-            for i in range(1, 11):
+         for i in range(1, 11):
                 tabla.insert(
                     "", "end",
                     values=(
@@ -4368,3 +4366,4 @@ tk.Button(
 
 ventana.mainloop()
 #mariana hizo base de datos - coming
+# mariana agrego alertas 
