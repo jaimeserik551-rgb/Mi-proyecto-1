@@ -6,10 +6,8 @@ import unicodedata
 import tempfile
 import json
 import os
-import hashlib import secrets
-
-#mariana agrego alertas
-
+import hashlib
+import secrets
 import html as html_lib
 import webbrowser
 from pathlib import Path
@@ -17,7 +15,8 @@ import mysql.connector
 from mysql.connector import Error
 import fitz
 from PIL import Image, ImageTk
-x
+
+
 ARCHIVO = "usuarios_escolares.json"
 
 AZUL_OSCURO = "#0f172a"
@@ -785,6 +784,7 @@ class VisorPDF(tk.Frame):
                 cursor="hand2", padx=12, pady=6
             )
 
+       
         boton("＋", lambda: self.cambiar_zoom(0.15)).pack(side="right", padx=(0, 8))
         boton("－", lambda: self.cambiar_zoom(-0.15)).pack(side="right", padx=(0, 8))
 
@@ -2697,40 +2697,8 @@ def abrir_panel_director(root):
             tk.Label(
                 contenido, text="CONTROL ESCOLAR",
                 bg=DOC_FONDO, fg=DOC_GRIS, font=("Arial", 8)
-            ).pack(anchor="w", padx=22, pady=(0, 15)) 
+            ).pack(anchor="w", padx=22, pady=(0, 15))
 
-<<<<<<< HEAD
-        def pantalla_asistencias()
-            limpiar_body("Registro de asistencias - 1A")
-            lienzo, cont = crear_area_desplazable(body, FONDO)
-
-            inner = tk.Frame(cont, bg=BLANCO)
-            inner.pack(fill="x", expand=True, padx=15, pady=10)
-#mariana agrego alertas 
-            columnas = ("No", "Matricula", "Nombre", "Asis", "Ret", "Falta")
-            tabla = ttk.Treeview(
-                inner, columns=columnas, show="headings", height=14
-            )
-
-            for columna in columnas:
-                tabla.heading(columna, text=columna)
-                tabla.column(
-                    columnas, width=70 if columna!= "Nombre" else 200,
-                    anchor="center", stretch=True
-                    )
-                tabla.pack(fill="both", expand=True, padx=10, pady=10)
-
-         for i in range(1, 11):
-                tabla.insert(
-                    "", "end",
-                    values=(
-                        i, f"A00{i}", f"Alumno {i} Perez",
-                        "X" if i != 6 else "", 1 if i == 3 else 0,
-                        1 if i == 6 else 0
-                    )
-                )
-
-=======
 
         def pantalla_listado(
             titulo_ventana, migas, titulo, descripcion, columnas, anchos,
@@ -2851,7 +2819,6 @@ def abrir_panel_director(root):
                 "No hay alumnos en alerta.",
                 imprimir_sel=lambda i: imprimir_alerta(alertas[i])
             )
->>>>>>> 17890f8096430c33e222da2c61e74cd304cab6de
 
         def pantalla_cartas():
             limpiar_body("Generar carta compromiso")
@@ -5803,11 +5770,10 @@ tk.Label(
     bg=TARJETA,
     fg=SUAVE
 ).pack(anchor="w", pady=(0, 9))
-#Rodrigo KPIs
 
 tk.Button(
     formulario,
-    text="Crear cuenta:)",
+    text="Crear cuenta",
     command=registrar_usuario,
     font=("Arial", 10, "bold"),
     bg=BOTON_SECUNDARIO,
@@ -5820,5 +5786,3 @@ tk.Button(
 ).pack(fill="x")
 
 ventana.mainloop()
-#mariana hizo base de datos - coming
-# mariana agrego alertas 
