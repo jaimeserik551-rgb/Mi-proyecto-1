@@ -791,15 +791,6 @@ class VisorPDF(tk.Frame):
         self.paginas = tk.Frame(self, bg=fondo)
         self.paginas.pack(fill="x")
 
-        ruta_pdf = buscar_pdf()
-        if ruta_pdf:
-            self.cargar(str(ruta_pdf))
-        else:
-            self._mensaje(
-                "No se encontró «diccionario.pdf».\n"
-                "Pulsa «Elegir otro PDF» para buscarlo."
-            )
-
     def _mensaje(self, texto):
         for w in self.paginas.winfo_children():
             w.destroy()
